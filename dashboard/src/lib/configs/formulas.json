@@ -38,6 +38,8 @@
     "DQ - Extent of Works": { "eod": 4, "eow": 11 },
     "DQ - Wrong Contact / Spam": { "eod": 4, "eow": 11 },
     "DQ - Lead Looking for Work": { "eod": 4, "eow": 11 },
+    "DQ - Recommended Another Company": { "eod": 4, "eow": 11 },
+    "DQ - Trying to Sell Me Something": { "eod": 4, "eow": 11 },
     "Facebook Ad Form": { "eod": 2, "eow": 11 },
     "Website Form": { "eod": 2, "eow": 11 },
     "Instagram Message": { "eod": 2, "eow": 11 },

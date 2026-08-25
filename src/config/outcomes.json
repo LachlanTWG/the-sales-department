@@ -23,6 +23,8 @@
     { "name": "DQ - Extent of Works", "category": "dq" },
     { "name": "DQ - Wrong Contact / Spam", "category": "dq" },
     { "name": "DQ - Lead Looking for Work", "category": "dq" },
+    { "name": "DQ - Recommended Another Company", "category": "dq" },
+    { "name": "DQ - Trying to Sell Me Something", "category": "dq" },
     { "name": "Facebook Ad Form", "category": "source" },
     { "name": "Website Form", "category": "source" },
     { "name": "Instagram Message", "category": "source" },
