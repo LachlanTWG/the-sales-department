@@ -12,13 +12,13 @@
       "name": "🛠️ Pipeline Progress",
       "outcomes": [
         "Requires Quoting", "Passed Onto {owner}", "Verbal Confirmation",
-        "Site Visits Booked", "Not Ready Yet - Pre-Quote", "Not Ready Yet - Post Quote"
+        "Waiting on Photos", "Site Visits Booked", "Not Ready Yet - Pre-Quote", "Not Ready Yet - Post Quote"
       ]
     },
     {
       "name": "📍 Lead Sources",
       "outcomes": [
-        "Facebook Ad Form", "Website Form", "Instagram Message", "Facebook Message",
+        "Facebook Ad Form", "Google Ads", "Website Form", "Instagram Message", "Facebook Message",
         "Direct Email", "Direct Phone Call", "Direct Text Message",
         "Direct Lead passed on from Client", "Recommended Another Company"
       ]
@@ -69,7 +69,7 @@
       "name": "🛠️ Pipeline Progress",
       "outcomes": [
         "Requires Quoting", "Passed Onto {owner}", "Verbal Confirmation",
-        "Site Visits Booked", "Not Ready Yet - Pre-Quote", "Not Ready Yet - Post Quote"
+        "Waiting on Photos", "Site Visits Booked", "Not Ready Yet - Pre-Quote", "Not Ready Yet - Post Quote"
       ]
     },
     {
@@ -103,7 +103,7 @@
     {
       "name": "📣 Marketing Sources",
       "outcomes": [
-        "Facebook Ad Form", "Website Form", "Instagram Message", "Facebook Message",
+        "Facebook Ad Form", "Google Ads", "Website Form", "Instagram Message", "Facebook Message",
         "Direct Email", "Direct Phone Call", "Direct Text Message",
         "Direct Lead passed on from Client", "Recommended Another Company"
       ]

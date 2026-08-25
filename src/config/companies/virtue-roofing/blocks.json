@@ -11,7 +11,7 @@
     {
       "name": "📍 Lead Sources",
       "outcomes": [
-        "Facebook Ad Form", "Website Form", "Instagram Message",
+        "Facebook Ad Form", "Google Ads", "Website Form", "Instagram Message",
         "Direct Email", "Direct Phone Call", "Direct Text Message",
         "Direct Lead passed on from Client"
       ]
@@ -37,7 +37,7 @@
       "outcomes": [
         "Not a Good Time", "Book Site Visit", "Rough Figures Sent",
         "Requesting New Roofing", "Passed Onto {owner}", "Verbal Confirm.",
-        "Recommended Julian", "PQS - Has a Blocker"
+        "Waiting on Photos", "Recommended Julian", "PQS - Has a Blocker"
       ]
     },
     {
@@ -68,7 +68,7 @@
     },
     {
       "name": "🛠️ Pipeline Progress",
-      "outcomes": ["Book Site Visit", "Rough Figures Sent", "Requesting New Roofing", "Passed Onto {owner}", "Verbal Confirm."]
+      "outcomes": ["Book Site Visit", "Rough Figures Sent", "Requesting New Roofing", "Passed Onto {owner}", "Verbal Confirm.", "Waiting on Photos"]
     },
     {
       "name": "📄 Quotes Sent",
@@ -105,7 +105,7 @@
     {
       "name": "📣 Marketing Sources",
       "outcomes": [
-        "Facebook Ad Form", "Website Form", "Instagram Message",
+        "Facebook Ad Form", "Google Ads", "Website Form", "Instagram Message",
         "Direct Email", "Direct Phone Call", "Direct Text Message",
         "Direct Lead passed on from Client"
       ]

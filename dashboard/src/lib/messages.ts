@@ -584,6 +584,7 @@ function buildTeamEODMessage(opts: {
       "Requires Quoting",
       `Passed Onto ${ownerName}`,
       "Verbal Confirmation",
+      "Waiting on Photos",
       "Site Visits Booked",
       "Not Ready Yet - Pre-Quote",
       "Not Ready Yet - Post Quote",
