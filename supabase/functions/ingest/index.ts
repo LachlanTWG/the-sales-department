@@ -379,10 +379,12 @@ Deno.serve(async (req) => {
           idByName.set(a.salesPersonName, await resolveSalesPersonId(company.id, a.salesPersonName));
         }
       }
-      const rows = builts.map((a) => toInsertRow(a, {
+      // Persist the sheet-shaped entry (incl. splitCommission / halfCommissionCharge)
+      // so TWA Conversion can derive team-split / 50% charge without a mass backfill.
+      const rows = builts.map((a, i) => toInsertRow(a, {
         companyId: company.id,
         salesPersonId: idByName.get(a.salesPersonName) ?? null,
-        rawPayload: { via: "dashboard" },
+        rawPayload: { ...(entries[i] || {}), via: "dashboard" },
       }));
       if (dryrun) return json(200, { status: "dryrun", rows });
 

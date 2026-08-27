@@ -42,6 +42,15 @@ function toRow(data) {
 function buildDbParams(data, ctx) {
   const eventType = EVENT_TYPE_TO_DB[data.eventType || 'EOD Update'];
   if (!eventType) return null;
+  // Manual Job Won entries carry splitCommission / halfCommissionCharge on the
+  // sheet-shaped row — persist them for TWA Conversion. GHL keeps webhook body.
+  let rawPayload = ctx.rawPayload || null;
+  if ((ctx.source || 'manual') === 'manual' && data && typeof data === 'object') {
+    rawPayload = {
+      ...data,
+      via: (ctx.rawPayload && ctx.rawPayload.via) || 'dashboard',
+    };
+  }
   return {
     companyName: ctx.companyName,
     salesPersonName: data.salesPerson || 'Unknown',
@@ -56,7 +65,7 @@ function buildDbParams(data, ctx) {
     appointmentAt: data.appointmentDateTime || null,
     source: ctx.source || 'manual',
     sourceRowId: ctx.sourceRowId || null,
-    rawPayload: ctx.rawPayload || null,
+    rawPayload,
   };
 }
 
