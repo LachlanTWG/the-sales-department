@@ -729,6 +729,7 @@ const DEFAULT_OUTCOMES = [
   "DQ - Lead Looking for Work",
   "DQ - Recommended Another Company",
   "DQ - Trying to Sell Me Something",
+  "DQ - Not Proceeding",
   // Terminal — Abandoned
   "Abandoned - Not Responding",
   "Abandoned - Headache",

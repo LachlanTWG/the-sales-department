@@ -30,6 +30,7 @@
     { "name": "DQ - Lead Looking for Work", "category": "dq" },
     { "name": "DQ - Recommended Another Company", "category": "dq" },
     { "name": "DQ - Trying to Sell Me Something", "category": "dq" },
+    { "name": "DQ - Not Proceeding", "category": "dq" },
     { "name": "Facebook Ad Form", "category": "source" },
     { "name": "Google Ads", "category": "source" },
     { "name": "Website Form", "category": "source" },

@@ -56,7 +56,8 @@
       "outcomes": [
         "DQ - Incorrect Details", "DQ - Out of Service Area", "DQ - Price",
         "DQ - Extent of Works", "DQ - Wrong Contact / Spam", "DQ - Lead Looking for Work",
-        "DQ - Recommended Another Company", "DQ - Trying to Sell Me Something"
+        "DQ - Recommended Another Company", "DQ - Trying to Sell Me Something",
+        "DQ - Not Proceeding"
       ]
     }
   ],
@@ -97,7 +98,8 @@
       "outcomes": [
         "DQ - Incorrect Details", "DQ - Out of Service Area", "DQ - Price",
         "DQ - Extent of Works", "DQ - Wrong Contact / Spam", "DQ - Lead Looking for Work",
-        "DQ - Recommended Another Company", "DQ - Trying to Sell Me Something"
+        "DQ - Recommended Another Company", "DQ - Trying to Sell Me Something",
+        "DQ - Not Proceeding"
       ]
     },
     {

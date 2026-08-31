@@ -29,6 +29,7 @@ const DEAD_OUTCOMES = new Set([
   'DQ - Lead Looking for Work',
   'DQ - Recommended Another Company',
   'DQ - Trying to Sell Me Something',
+  'DQ - Not Proceeding',
   'Lost - Price',
   'Lost - Time Related',
   'Lost - Priorities Changed',
