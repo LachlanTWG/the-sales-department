@@ -24,6 +24,7 @@ import {
   type NewActivityItem,
 } from "@/lib/manualActivities";
 import {
+  createQuotieCallback,
   createQuotieSiteVisit,
   createQuotieTask,
   getQuotieTeamMembers,
@@ -51,7 +52,7 @@ export type EodEntryInput = {
    * are user-editable form values.
    */
   quotie?: {
-    type: "task" | "site_visit";
+    type: "task" | "site_visit" | "callback";
     title?: string;
     notes?: string;
     due_date?: string;
@@ -497,6 +498,24 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
     } else if (action.type !== input.quotie.type) {
       // Client/server disagree (config changed mid-session) — skip, don't guess.
       visitRes = { ok: false, detail: "Quotie action changed — reload and retry" };
+    } else if (action.type === "callback") {
+      // Pipeline callback (e.g. Requires Quoting) — moves the Quotie lead into
+      // the matching pipeline column. notes carries the free-text EOD detail.
+      const res = await createQuotieCallback(quotieConfig, {
+        outcome: action.outcome || "requires_quoting",
+        ghl_contact_id: quotieGhlContactId,
+        notes: input.quotie.notes,
+        salesPersonName,
+        assign_to: action.assign_to,
+        callback_reason: "Requires quoting (EOD log)",
+      });
+      if (res.ok) {
+        const parts = ["Pipeline: added to Requires Quoting"];
+        if (res.warnings?.length) parts.push(res.warnings.join("; "));
+        visitRes = { ok: true, detail: parts.join(" · ") };
+      } else {
+        visitRes = { ok: false, detail: res.error };
+      }
     } else if (action.type === "site_visit") {
       const res = await createQuotieSiteVisit(quotieConfig, {
         date: input.quotie.date || input.occurred_on,

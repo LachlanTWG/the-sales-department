@@ -5,7 +5,7 @@
 // and user_map live in companies.quotie_config and must never reach the
 // browser: safeQuotieActions() is the only projection the client ever sees.
 
-export type QuotieActionType = "task" | "site_visit";
+export type QuotieActionType = "task" | "site_visit" | "callback";
 
 /** Stripped team-member shape sent to the browser — never includes quotie_auth_id. */
 export type QuotieTeamMember = { id: string; name: string | null; is_primary: boolean };
@@ -16,6 +16,8 @@ export type QuotieAction = {
   titleTemplate?: string;
   /** Quotie users.auth_id override for this specific action. */
   assign_to?: string;
+  /** api-callbacks outcome for a callback action (e.g. "requires_quoting"). */
+  outcome?: string;
 };
 
 export type QuotieConfig = {
@@ -34,7 +36,10 @@ export type QuotieConfig = {
  */
 export const DEFAULT_QUOTIE_ACTIONS: Record<string, QuotieAction> = {
   "Book Site Visit": { type: "site_visit" },
-  "Requires Quoting": { type: "task", titleTemplate: "Prepare quote for {contact}" },
+  // Requires Quoting now drops the lead into Quotie's Requires Quoting pipeline
+  // column (with a Create Quote button on the card) instead of a task — the
+  // pipeline card supersedes the "Prepare quote for {contact}" task.
+  "Requires Quoting": { type: "callback", outcome: "requires_quoting" },
   "Waiting on Photos": { type: "task", titleTemplate: "Chase photos from {contact}" },
   "Not a Good Time to Talk": { type: "task", titleTemplate: "Call back {contact}" },
 };
@@ -116,6 +121,19 @@ type QuotieTaskInput = {
   /** Explicit assignee (auth_id) — wins over the user_map lookup. */
   assign_to?: string;
   ghl_contact_id?: string;
+};
+
+type QuotieCallbackInput = {
+  /** api-callbacks outcome, e.g. "requires_quoting". */
+  outcome: string;
+  ghl_contact_id?: string;
+  /** Free-text detail (job details / EOD notes) — lands in attempt history. */
+  notes?: string;
+  /** Roster name — mapped to a Quotie users.auth_id via config.user_map. */
+  salesPersonName?: string;
+  /** Explicit assignee (auth_id) — wins over the user_map lookup. */
+  assign_to?: string;
+  callback_reason?: string;
 };
 
 type QuotieSiteVisitInput = {
@@ -330,4 +348,27 @@ export async function createQuotieSiteVisit(
   if (assigned_to) body.assigned_to = assigned_to;
   if (input.ghl_assigned_user_id?.trim()) body.ghl_assigned_user_id = input.ghl_assigned_user_id.trim();
   return postQuotie(config, "api-site-visits", body);
+}
+
+/**
+ * Push an EOD outcome into Quotie's callback pipeline (api-callbacks). Used for
+ * the Requires Quoting outcome, which lands the lead in the Requires Quoting
+ * column with a Create Quote button. Never throws — always returns a
+ * QuotieCallResult. `attempted_by` is resolved from the company's user_map by
+ * exec short name (same lookup the task path uses); unmapped execs log the
+ * attempt unattributed.
+ */
+export async function createQuotieCallback(
+  config: QuotieConfig,
+  input: QuotieCallbackInput,
+): Promise<QuotieCallResult> {
+  const attempted_by = resolveAssignee(config, input.salesPersonName, input.assign_to);
+  const body: Record<string, unknown> = {
+    outcome: input.outcome,
+    callback_reason: input.callback_reason || "Requires quoting (EOD log)",
+  };
+  if (input.ghl_contact_id?.trim()) body.ghl_contact_id = input.ghl_contact_id.trim();
+  if (input.notes?.trim()) body.notes = input.notes.trim();
+  if (attempted_by) body.attempted_by = attempted_by;
+  return postQuotie(config, "api-callbacks", body);
 }

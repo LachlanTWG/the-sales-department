@@ -145,7 +145,7 @@ export function EodEntryForm({
   history?: ContactHistory | null;
   pendingSiteVisits?: PendingSiteVisit[];
   /** EOD 3 outcome → Quotie action kind. Empty {} disables the feature. */
-  quotieActions?: Record<string, "task" | "site_visit">;
+  quotieActions?: Record<string, "task" | "site_visit" | "callback">;
   /** Company has a Quotie api_key — enables the always-available task checkbox. */
   quotieEnabled?: boolean;
 }) {
@@ -155,7 +155,7 @@ export function EodEntryForm({
   const [pipelineNote, setPipelineNote] = useState<string | null>(null);
   const [pipelineOk, setPipelineOk] = useState<boolean>(false);
   const [quotieResult, setQuotieResult] = useState<{ ok: boolean; detail?: string } | null>(null);
-  const [quotieKindDone, setQuotieKindDone] = useState<"task" | "site_visit" | null>(null);
+  const [quotieKindDone, setQuotieKindDone] = useState<"task" | "site_visit" | "callback" | null>(null);
   const [openPendings, setOpenPendings] = useState<PendingSiteVisit[]>(pendingSiteVisits);
   const [activePending, setActivePending] = useState<PendingSiteVisit | null>(null);
   const [svRough, setSvRough] = useState("");
@@ -293,7 +293,10 @@ export function EodEntryForm({
 
   useEffect(() => {
     if (userTouchedTask.current) return;
-    if (quotieActions[stdOutcome] === "task") setQtaskEnabled(true);
+    // Auto-tick the sticky-bar checkbox for outcomes that map to a task or a
+    // pipeline callback (e.g. Requires Quoting → Add to Quotie pipeline).
+    const kind = quotieActions[stdOutcome];
+    if (kind === "task" || kind === "callback") setQtaskEnabled(true);
   }, [stdOutcome, quotieActions]);
 
   // Lazy-fetch team members once when the site-visit section becomes active.
@@ -468,8 +471,9 @@ export function EodEntryForm({
   }
 
   function submit(payloadItems: NewActivityItem[], evType: EventType) {
-    // Site visit stays outcome-mapped; the task is independent (sticky-bar
-    // checkbox) and rides along in quotie_task regardless of outcome.
+    // Site visit + callback are outcome-mapped (server re-resolves the type);
+    // the plain task is independent (sticky-bar checkbox) and rides along in
+    // quotie_task regardless of outcome.
     let quotie: EodEntryInput["quotie"];
     if (evType === "eod_update" && quotieKind === "site_visit" && qsvEnabled) {
       quotie = {
@@ -483,10 +487,19 @@ export function EodEntryForm({
         details: qsvDetails.trim() || undefined,
         ghl_assigned_user_id: qsvTeam || undefined,
       };
+    } else if (evType === "eod_update" && quotieKind === "callback" && qtaskEnabled) {
+      // The sticky-bar checkbox doubles as "Add to Quotie pipeline" here. The
+      // notes field carries the free-text EOD detail into the attempt history.
+      quotie = {
+        type: "callback",
+        notes: qtaskNotes.trim() || undefined,
+      };
     }
 
+    // Independent task path — skipped when the outcome maps to a callback, since
+    // the same checkbox is driving the callback above (don't double up).
     const quotie_task: EodEntryInput["quotie_task"] =
-      evType === "eod_update" && quotieEnabled && qtaskEnabled
+      evType === "eod_update" && quotieEnabled && qtaskEnabled && quotieKind !== "callback"
         ? {
             title: qtaskTitle.trim() || undefined,
             notes: qtaskNotes.trim() || undefined,
@@ -1088,8 +1101,14 @@ export function EodEntryForm({
           {quotieEnabled && eventType === "eod_update" && qtaskEnabled && (
             <div className="space-y-3 rounded-lg border border-sky-900/60 bg-sky-950/20 p-3">
               <span className="block text-[11px] font-medium uppercase tracking-wider text-sky-300/90">
-                Quotie task
+                {quotieKind === "callback" ? "Quotie pipeline" : "Quotie task"}
               </span>
+              {quotieKind === "callback" ? (
+                <p className="text-[11px] leading-relaxed text-sky-200/70">
+                  Drops this lead into Quotie&apos;s Requires Quoting column with a Create Quote button. Add any detail for the attempt history below.
+                </p>
+              ) : (
+              <>
               <Field label="Title" hint="Leave blank to auto-title from the outcome.">
                 <input
                   type="text"
@@ -1130,6 +1149,8 @@ export function EodEntryForm({
                   className={inputClass}
                 />
               </Field>
+              </>
+              )}
               <Field label="Notes" hint="Optional.">
                 <textarea
                   value={qtaskNotes}
@@ -1168,7 +1189,9 @@ export function EodEntryForm({
                       <span className="mt-0.5 block text-sky-300">
                         ✓ {quotieKindDone === "site_visit"
                           ? (quotieTaskDone ? "Site visit + task created in Quotie" : "Site visit booked in Quotie")
-                          : "Task created in Quotie"}
+                          : quotieKindDone === "callback"
+                            ? "Added to Quotie pipeline"
+                            : "Task created in Quotie"}
                         {quotieResult.detail ? ` · ${quotieResult.detail}` : ""}
                       </span>
                     )}
@@ -1194,7 +1217,9 @@ export function EodEntryForm({
                     }}
                     className="rounded border-zinc-600 bg-zinc-900"
                   />
-                  <span className="truncate font-medium text-zinc-200">Also create a Quotie task</span>
+                  <span className="truncate font-medium text-zinc-200">
+                    {quotieKind === "callback" ? "Add to Quotie pipeline" : "Also create a Quotie task"}
+                  </span>
                 </label>
               ) : (
                 <span />
