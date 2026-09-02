@@ -6,12 +6,12 @@
 
 Quotie now has a `/pipeline` page: a read-only kanban of the whole sales cycle. Stages are **derived** from data — nobody drags cards. A lead moves columns only when something real happens: a call gets logged, a quote gets sent, a visit gets booked, a deal closes.
 
-**Pre-quote board:** `New Lead → Day 1–5 (by attempt count) → Parked (not a good time) → Requires Quoting → Site Visit`
-**Post-quote board:** `Quote Sent → 1st/2nd/3rd+ Follow-Up → 🔥 Hot → 🤝 Verbal Yes → Won / Lost`
+**Pre-quote board:** `Day 1–5 (by attempt count; first no-answer = Day 1) → Parked (not a good time) → Requires Quoting → Site Visit`
+**Post-quote board:** `Quote Sent → 1st/2nd/3rd+ Follow-Up → 🔥 Hot → Site Visit → 🤝 Verbal Yes → ✍️ Signed → Won / Lost / Expired`
 
 The pre-quote half runs on Quotie's `callback_leads` (5-strike auto-abandon cadence). **The EOD popup is the intended source of those call events** — an exec logs an outcome on the GHL contact page, and the matching Quotie card moves within seconds.
 
-## The endpoint (live on Quotie prod, currently uncalled)
+## The endpoint (live on Quotie prod)
 
 `POST https://ucmgleztmtyoptcflsia.supabase.co/functions/v1/api-callbacks`
 Auth: existing per-company Quotie API key (`Authorization: Bearer qk_…`). **All 6 live "EOD Creator" keys already have the required `callbacks:write` scope** — no key changes needed.
@@ -19,7 +19,7 @@ Auth: existing per-company Quotie API key (`Authorization: Bearer qk_…`). **Al
 ```json
 {
   "ghl_contact_id": "<required — scraped GHL contact id>",
-  "outcome": "no_answer | answered | voicemail | wrong_number | callback_requested | requires_quoting",
+  "outcome": "no_answer | answered | voicemail | wrong_number | callback_requested | requires_quoting | lost",
   "notes": "optional — lands in the lead's attempt history",
   "callback_date": "optional ISO — when to call back",
   "attempted_by": "optional Quotie users.auth_id — from the existing user_map",
@@ -36,10 +36,11 @@ What Quotie does per outcome (mirrors its in-app callback actions exactly):
 | `callback_requested` | Attempt +1, lead → **Parked** column, callback date = supplied or next business day |
 | `requires_quoting` | Lead → **Requires Quoting** column with a "+ Create Quote" button on the card |
 | `wrong_number` | Logged to history only; lead untouched |
+| `lost` | Closes the contact's active lead (Lost) + logs the attempt; `{noop:true}` HTTP 200 when no lead exists |
 
 If the GHL contact has no Quotie callback lead yet, one is created automatically (contact auto-imported from GHL if needed — same shared import used by api-tasks/api-site-visits, dedupe + soft-delete revive included). Response: `201` with `{lead_id, lead_status, attempt_number, attempt_count, callback_date, contact, contact_source, created_lead, warnings?}`. Client errors never block anything on our side by design — same "never throw, never fail the EOD submit" philosophy as the existing Quotie actions.
 
-## Proposed changes to this repo (NOT YET BUILT)
+## Changes to this repo (as-built — see "Full intake mapping" below for the final table)
 
 Mirroring the existing `createQuotieTask` / `createQuotieSiteVisit` pattern in `dashboard/src/app/eod-entry/`:
 
