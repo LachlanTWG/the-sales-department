@@ -1,6 +1,6 @@
 # Quotie Pipeline Integration
 
-> How EOD call outcomes will drive Quotie's new `/pipeline` page. Quotie's side is **live on prod** (2026-09-01); the changes to THIS repo described below are **proposed, not yet built** — waiting on Buzz ↔ Lockie sign-off because `main` auto-deploys.
+> How EOD call outcomes drive Quotie's `/pipeline` page. Quotie's side went live 2026-09-01; **this repo's wiring shipped 2026-09-02 (commit 58f607a, Buzz-approved full cutover, all 6 companies)** — "Requires Quoting" now creates a Quotie pipeline lead instead of a "Prepare quote" task. The "proposed changes" section below is now the as-built description; per-company `quotie_config.actions` overrides remain the opt-out lever. Quotie also backfilled all open "Prepare quote for X" tasks into Requires Quoting pipeline leads (38 leads, 2026-09-02) and completed those tasks.
 
 ## What Quotie built
 
