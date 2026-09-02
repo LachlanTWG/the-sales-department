@@ -22,7 +22,7 @@ import {
 } from "./data";
 import { MeView, TabBar, TodayView } from "./views";
 import { EodEntryForm } from "./EodEntryForm";
-import { safeQuotieActions, type QuotieConfig } from "./quotie";
+import { safeAnsweredCallbacks, safeQuotieActions, type QuotieConfig } from "./quotie";
 // Force dark even if THEME_BOOT already ran (dashboard cookie is light).
 const EOD_THEME_BOOT = `(function(){try{var r=document.documentElement;r.classList.add("dark");r.style.colorScheme="dark";}catch(e){}})();`;
 
@@ -140,6 +140,8 @@ export default async function EodEntryPage({
     // Safe outcome→type projection for the Quotie action sections. Empty {}
     // for clients without a configured api_key — zero visual change.
     const quotieActions = safeQuotieActions(company.quotie_config);
+    // EOD 2 (Answered?) → pipeline callback projection (no_answer / voicemail).
+    const answeredCallbacks = safeAnsweredCallbacks(company.quotie_config);
     // Feature flag for the always-available task checkbox: quotieActions is
     // {} both for "no api_key" and "no mapped outcomes", so derive separately.
     const quotieEnabled = !!(company.quotie_config as QuotieConfig | null | undefined)?.api_key;
@@ -161,6 +163,7 @@ export default async function EodEntryPage({
         history={history}
         pendingSiteVisits={pendingVisits}
         quotieActions={quotieActions}
+        answeredCallbacks={answeredCallbacks}
         quotieEnabled={quotieEnabled}
       />
     );

@@ -27,6 +27,8 @@ export type QuotieConfig = {
   user_map?: Record<string, string>;
   /** EOD 3 outcome → action, or null to disable the default. */
   actions?: Record<string, QuotieAction | null>;
+  /** EOD 2 (Answered?) selection → api-callbacks outcome, or null to disable. */
+  answered_callbacks?: Record<string, string | null>;
 };
 
 /**
@@ -41,8 +43,64 @@ export const DEFAULT_QUOTIE_ACTIONS: Record<string, QuotieAction> = {
   // pipeline card supersedes the "Prepare quote for {contact}" task.
   "Requires Quoting": { type: "callback", outcome: "requires_quoting" },
   "Waiting on Photos": { type: "task", titleTemplate: "Chase photos from {contact}" },
-  "Not a Good Time to Talk": { type: "task", titleTemplate: "Call back {contact}" },
+  // Not a Good Time now Parks the lead in Quotie (callback_requested) instead of
+  // a task — supersedes the "Call back {contact}" task.
+  "Not a Good Time to Talk": { type: "callback", outcome: "callback_requested" },
+  // DQ / Lost terminal outcomes → Quotie's Lost column. lost-with-no-lead is a
+  // graceful no-op on Quotie's side (see actions.ts noop handling).
+  "Lost - Price": { type: "callback", outcome: "lost" },
+  "Lost - Time Related": { type: "callback", outcome: "lost" },
+  "Lost - Priorities Changed": { type: "callback", outcome: "lost" },
+  "DQ - Incorrect Details": { type: "callback", outcome: "lost" },
+  "DQ - Wrong Contact / Spam": { type: "callback", outcome: "lost" },
+  "DQ - Out of Service Area": { type: "callback", outcome: "lost" },
+  "DQ - Extent of Works": { type: "callback", outcome: "lost" },
+  "DQ - Price": { type: "callback", outcome: "lost" },
+  "DQ - Lead Looking for Work": { type: "callback", outcome: "lost" },
+  "DQ - Recommended Another Company": { type: "callback", outcome: "lost" },
+  "DQ - Trying to Sell Me Something": { type: "callback", outcome: "lost" },
+  "DQ - Not Proceeding": { type: "callback", outcome: "lost" },
+  // Abandoned = terminal too (Buzz 2026-09-02): close the Quotie lead like DQ/Lost.
+  "Abandoned - Not Responding": { type: "callback", outcome: "lost" },
+  "Abandoned - Headache": { type: "callback", outcome: "lost" },
 };
+
+/**
+ * EOD 2 (Answered?) selection → api-callbacks outcome. The no-answer signal
+ * lives on the EOD 2 step, NOT the EOD 3 outcome dropdown: the current form is
+ * binary ("Answered" / "Didn't Answer"). "Didn't Answer" → no_answer (Quotie
+ * derives the lead into Day 1 on first log, bumps Day N on repeats). If a
+ * voicemail-type EOD 2 value is ever added it maps to voicemail. "Answered"
+ * alone is NOT a callback signal — it only fires via an EOD 3 outcome mapping.
+ */
+export const DEFAULT_ANSWERED_CALLBACKS: Record<string, string> = {
+  "Didn't Answer": "no_answer",
+  "No Answer": "no_answer",
+  "Voicemail": "voicemail",
+  "Left Voicemail": "voicemail",
+};
+
+/**
+ * Resolve the api-callbacks outcome for an EOD 2 (Answered?) selection, or null
+ * when the selection isn't a no-answer/voicemail signal. Gated on api_key like
+ * resolveQuotieAction. Per-company overrides live under
+ * quotie_config.answered_callbacks (same null-to-disable semantics).
+ */
+export function resolveAnsweredCallback(
+  answered: string,
+  config: QuotieConfig | null | undefined,
+): string | null {
+  if (!config?.api_key) return null;
+  const key = (answered || "").trim();
+  if (!key) return null;
+
+  const overrides = config.answered_callbacks;
+  if (overrides != null && Object.prototype.hasOwnProperty.call(overrides, key)) {
+    const override = overrides[key];
+    return override === null ? null : override || null;
+  }
+  return DEFAULT_ANSWERED_CALLBACKS[key] ?? null;
+}
 
 /**
  * Resolve the Quotie action for an EOD 3 outcome, merging the per-client
@@ -97,12 +155,35 @@ export function safeQuotieActions(
   return out;
 }
 
+/**
+ * Safe projection of which EOD 2 (Answered?) selections push a Quotie pipeline
+ * callback (no_answer / voicemail). Plain { answered -> true } so the form can
+ * drive the "Add to Quotie pipeline" toggle off the EOD 2 step. Never leaks
+ * api_key / user_map. Empty when the integration is off.
+ */
+export function safeAnsweredCallbacks(
+  config: QuotieConfig | null | undefined,
+): Record<string, true> {
+  const out: Record<string, true> = {};
+  if (!config?.api_key) return out;
+  const keys = new Set<string>([
+    ...Object.keys(DEFAULT_ANSWERED_CALLBACKS),
+    ...(config.answered_callbacks ? Object.keys(config.answered_callbacks) : []),
+  ]);
+  for (const key of keys) {
+    if (resolveAnsweredCallback(key, config)) out[key] = true;
+  }
+  return out;
+}
+
 const QUOTIE_TIMEOUT_MS = 10_000;
 
 export type QuotieCallResult = {
   ok: boolean;
   warnings?: string[];
   error?: string;
+  /** api-callbacks graceful no-op (e.g. lost with no existing lead) — HTTP 200 {noop:true}. */
+  noop?: boolean;
   /** GHL appointment result from a successful api-site-visits response. */
   ghl?: {
     status?: string;
@@ -134,6 +215,8 @@ type QuotieCallbackInput = {
   /** Explicit assignee (auth_id) — wins over the user_map lookup. */
   assign_to?: string;
   callback_reason?: string;
+  /** ISO date/time — when to call back (callback_requested). */
+  callback_date?: string;
 };
 
 type QuotieSiteVisitInput = {
@@ -271,6 +354,10 @@ async function postQuotie(
       parsed && typeof parsed === "object" && Array.isArray((parsed as { warnings?: unknown }).warnings)
         ? ((parsed as { warnings?: string[] }).warnings as string[])
         : undefined;
+    const noop =
+      parsed && typeof parsed === "object" && (parsed as { noop?: unknown }).noop === true
+        ? true
+        : undefined;
     const rawGhl =
       parsed && typeof parsed === "object" && "ghl" in parsed && parsed !== null
         ? (parsed as { ghl?: unknown }).ghl
@@ -290,7 +377,7 @@ async function postQuotie(
               : undefined,
           }
         : undefined;
-    return { ok: true, warnings, ghl };
+    return { ok: true, warnings, ghl, noop };
   } catch (e) {
     const msg = (e as Error).name === "AbortError" ? "Quotie timed out" : (e as Error).message;
     return { ok: false, error: msg };
@@ -351,22 +438,22 @@ export async function createQuotieSiteVisit(
 }
 
 /**
- * Push an EOD outcome into Quotie's callback pipeline (api-callbacks). Used for
- * the Requires Quoting outcome, which lands the lead in the Requires Quoting
- * column with a Create Quote button. Never throws — always returns a
- * QuotieCallResult. `attempted_by` is resolved from the company's user_map by
- * exec short name (same lookup the task path uses); unmapped execs log the
- * attempt unattributed.
+ * Push an EOD outcome into Quotie's callback pipeline (api-callbacks). Drives
+ * every pipeline move from the EOD selector: requires_quoting (Requires Quoting
+ * column), callback_requested (Parked), no_answer/voicemail (Day N cadence),
+ * lost (Lost column — graceful no-op when no lead exists). Never throws —
+ * always returns a QuotieCallResult. `attempted_by` is resolved from the
+ * company's user_map by exec short name (same lookup the task path uses);
+ * unmapped execs log the attempt unattributed.
  */
 export async function createQuotieCallback(
   config: QuotieConfig,
   input: QuotieCallbackInput,
 ): Promise<QuotieCallResult> {
   const attempted_by = resolveAssignee(config, input.salesPersonName, input.assign_to);
-  const body: Record<string, unknown> = {
-    outcome: input.outcome,
-    callback_reason: input.callback_reason || "Requires quoting (EOD log)",
-  };
+  const body: Record<string, unknown> = { outcome: input.outcome };
+  if (input.callback_reason?.trim()) body.callback_reason = input.callback_reason.trim();
+  if (input.callback_date?.trim()) body.callback_date = input.callback_date.trim();
   if (input.ghl_contact_id?.trim()) body.ghl_contact_id = input.ghl_contact_id.trim();
   if (input.notes?.trim()) body.notes = input.notes.trim();
   if (attempted_by) body.attempted_by = attempted_by;

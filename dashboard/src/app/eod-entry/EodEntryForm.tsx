@@ -100,6 +100,28 @@ const STAGE_SHORT_LABELS: Record<string, string> = {
   "Post Quote Follow Up": "Post Quote",
 };
 
+/** Human blurb for the "Add to Quotie pipeline" section, per outcome. */
+function pipelineDescription(
+  stdOutcome: string,
+  eod3Callback: boolean,
+  eod2Callback: boolean,
+): string {
+  if (eod2Callback) {
+    return "Logs a no-answer attempt in Quotie's pipeline — the lead moves along the call-back cadence. Add any detail for the attempt history below.";
+  }
+  if (eod3Callback) {
+    if (stdOutcome === "Requires Quoting") {
+      return "Drops this lead into Quotie's Requires Quoting column with a Create Quote button. Add any detail for the attempt history below.";
+    }
+    if (stdOutcome === "Not a Good Time to Talk") {
+      return "Parks this lead in Quotie for a later call-back. Add any detail for the attempt history below.";
+    }
+    // DQ / Lost family
+    return "Moves this lead to Quotie's Lost column. Add any detail for the attempt history below.";
+  }
+  return "Adds this lead to Quotie's pipeline. Add any detail for the attempt history below.";
+}
+
 /** YYYY-MM-DD `days` from now, in local time. */
 function isoInDays(days: number): string {
   const d = new Date();
@@ -124,6 +146,7 @@ export function EodEntryForm({
   history = null,
   pendingSiteVisits = [],
   quotieActions = {},
+  answeredCallbacks = {},
   quotieEnabled = false,
 }: {
   token: string;
@@ -146,6 +169,8 @@ export function EodEntryForm({
   pendingSiteVisits?: PendingSiteVisit[];
   /** EOD 3 outcome → Quotie action kind. Empty {} disables the feature. */
   quotieActions?: Record<string, "task" | "site_visit" | "callback">;
+  /** EOD 2 (Answered?) selection → pushes a no-answer/voicemail pipeline callback. */
+  answeredCallbacks?: Record<string, true>;
   /** Company has a Quotie api_key — enables the always-available task checkbox. */
   quotieEnabled?: boolean;
 }) {
@@ -266,6 +291,14 @@ export function EodEntryForm({
 
   // ── Quotie action state (only relevant when quotieActions[stdOutcome] set) ──
   const quotieKind = quotieActions[stdOutcome];
+  // A pipeline callback can come from EOD 3 (quotieKind === "callback") OR from
+  // the EOD 2 "Answered?" step (no-answer / voicemail). EOD 3 wins — never both.
+  const eod3Callback = quotieKind === "callback";
+  const eod2Callback = !eod3Callback && !!answeredCallbacks[answered];
+  const pipelineCallback = eod3Callback || eod2Callback;
+  // Only "Not a Good Time to Talk" captures a when-to-call-back date (Parked).
+  const showCallbackDate = eod3Callback && stdOutcome === "Not a Good Time to Talk";
+  const [qcbDate, setQcbDate] = useState("");
   // Site visit
   const [qsvEnabled, setQsvEnabled] = useState(true);
   const [qsvDate, setQsvDate] = useState(() => isoInDays(1));
@@ -293,11 +326,14 @@ export function EodEntryForm({
 
   useEffect(() => {
     if (userTouchedTask.current) return;
-    // Auto-tick the sticky-bar checkbox for outcomes that map to a task or a
-    // pipeline callback (e.g. Requires Quoting → Add to Quotie pipeline).
+    // Auto-tick the sticky-bar checkbox for outcomes that map to a task, an
+    // EOD 3 pipeline callback (Requires Quoting, Not a Good Time, DQ/Lost), or
+    // an EOD 2 no-answer/voicemail callback.
     const kind = quotieActions[stdOutcome];
-    if (kind === "task" || kind === "callback") setQtaskEnabled(true);
-  }, [stdOutcome, quotieActions]);
+    if (kind === "task" || kind === "callback" || !!answeredCallbacks[answered]) {
+      setQtaskEnabled(true);
+    }
+  }, [stdOutcome, answered, quotieActions, answeredCallbacks]);
 
   // Lazy-fetch team members once when the site-visit section becomes active.
   useEffect(() => {
@@ -487,19 +523,27 @@ export function EodEntryForm({
         details: qsvDetails.trim() || undefined,
         ghl_assigned_user_id: qsvTeam || undefined,
       };
-    } else if (evType === "eod_update" && quotieKind === "callback" && qtaskEnabled) {
+    } else if (evType === "eod_update" && eod3Callback && qtaskEnabled) {
       // The sticky-bar checkbox doubles as "Add to Quotie pipeline" here. The
       // notes field carries the free-text EOD detail into the attempt history.
       quotie = {
         type: "callback",
         notes: qtaskNotes.trim() || undefined,
+        callback_date: showCallbackDate ? (qcbDate.trim() || undefined) : undefined,
       };
     }
 
-    // Independent task path — skipped when the outcome maps to a callback, since
-    // the same checkbox is driving the callback above (don't double up).
+    // EOD 2 no-answer / voicemail callback — server re-resolves the outcome
+    // from eod_fields.answered; presence = the checkbox is on. Notes ride along.
+    const quotie_answered_callback: EodEntryInput["quotie_answered_callback"] =
+      evType === "eod_update" && eod2Callback && qtaskEnabled
+        ? { notes: qtaskNotes.trim() || undefined }
+        : undefined;
+
+    // Independent task path — skipped when a pipeline callback (EOD 3 or EOD 2)
+    // is driving the same checkbox, so we never create a task AND a callback.
     const quotie_task: EodEntryInput["quotie_task"] =
-      evType === "eod_update" && quotieEnabled && qtaskEnabled && quotieKind !== "callback"
+      evType === "eod_update" && quotieEnabled && qtaskEnabled && !pipelineCallback
         ? {
             title: qtaskTitle.trim() || undefined,
             notes: qtaskNotes.trim() || undefined,
@@ -520,6 +564,7 @@ export function EodEntryForm({
           : undefined,
       quotie,
       quotie_task,
+      quotie_answered_callback,
     };
     startTransition(async () => {
       const res = await submitEodEntry(input);
@@ -528,7 +573,11 @@ export function EodEntryForm({
       setPipelineNote(res.pipeline ?? null);
       setPipelineOk(res.pipelineOk ?? false);
       setQuotieResult(res.quotie_result ?? null);
-      setQuotieKindDone(input.quotie?.type ?? (input.quotie_task ? "task" : null));
+      setQuotieKindDone(
+        input.quotie?.type
+          ?? (input.quotie_answered_callback ? "callback" : null)
+          ?? (input.quotie_task ? "task" : null),
+      );
       setQuotieTaskDone(!!input.quotie_task);
       if (evType === "eod_update") {
         // Keep stage + source (same contact, likely same context next time);
@@ -1101,12 +1150,24 @@ export function EodEntryForm({
           {quotieEnabled && eventType === "eod_update" && qtaskEnabled && (
             <div className="space-y-3 rounded-lg border border-sky-900/60 bg-sky-950/20 p-3">
               <span className="block text-[11px] font-medium uppercase tracking-wider text-sky-300/90">
-                {quotieKind === "callback" ? "Quotie pipeline" : "Quotie task"}
+                {pipelineCallback ? "Quotie pipeline" : "Quotie task"}
               </span>
-              {quotieKind === "callback" ? (
-                <p className="text-[11px] leading-relaxed text-sky-200/70">
-                  Drops this lead into Quotie&apos;s Requires Quoting column with a Create Quote button. Add any detail for the attempt history below.
-                </p>
+              {pipelineCallback ? (
+                <>
+                  <p className="text-[11px] leading-relaxed text-sky-200/70">
+                    {pipelineDescription(stdOutcome, eod3Callback, eod2Callback)}
+                  </p>
+                  {showCallbackDate && (
+                    <Field label="Call back on" hint="Optional — when to try again.">
+                      <input
+                        type="date"
+                        value={qcbDate}
+                        onChange={e => setQcbDate(e.target.value)}
+                        className={inputClass}
+                      />
+                    </Field>
+                  )}
+                </>
               ) : (
               <>
               <Field label="Title" hint="Leave blank to auto-title from the outcome.">
@@ -1218,7 +1279,7 @@ export function EodEntryForm({
                     className="rounded border-zinc-600 bg-zinc-900"
                   />
                   <span className="truncate font-medium text-zinc-200">
-                    {quotieKind === "callback" ? "Add to Quotie pipeline" : "Also create a Quotie task"}
+                    {pipelineCallback ? "Add to Quotie pipeline" : "Also create a Quotie task"}
                   </span>
                 </label>
               ) : (

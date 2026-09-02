@@ -28,6 +28,7 @@ import {
   createQuotieSiteVisit,
   createQuotieTask,
   getQuotieTeamMembers,
+  resolveAnsweredCallback,
   resolveQuotieAction,
   type QuotieConfig,
   type QuotieTeamMember,
@@ -56,6 +57,8 @@ export type EodEntryInput = {
     title?: string;
     notes?: string;
     due_date?: string;
+    /** When-to-call-back ISO for callback_requested (Not a Good Time). */
+    callback_date?: string;
     date?: string;
     time?: string;
     address?: string;
@@ -74,6 +77,15 @@ export type EodEntryInput = {
     title?: string;
     notes?: string;
     due_date?: string;
+  };
+  /**
+   * On/off request for the EOD 2 (Answered?) no-answer pipeline callback.
+   * Presence = the exec left the "Add to Quotie pipeline" checkbox ticked. The
+   * server still re-resolves the actual outcome from eod_fields.answered — the
+   * client never supplies the outcome, only the notes + the on switch.
+   */
+  quotie_answered_callback?: {
+    notes?: string;
   };
 };
 
@@ -102,6 +114,37 @@ function toMachineAppointmentAt(
     if (/\b(am|pm)\b/i.test(s) && !/^\d{4}-\d{2}-\d{2}/.test(s)) continue;
   }
   return "";
+}
+
+/** api-callbacks callback_reason line for the lead's attempt history. */
+function callbackReasonFor(outcome: string, stdOutcome: string): string {
+  switch (outcome) {
+    case "requires_quoting": return "Requires quoting (EOD log)";
+    case "callback_requested": return "Not a good time — parked (EOD log)";
+    case "no_answer": return "No answer (EOD log)";
+    case "voicemail": return "Left voicemail (EOD log)";
+    case "lost": return `Lost — ${stdOutcome || "DQ"} (EOD log)`;
+    default: return "EOD log";
+  }
+}
+
+/** Human success detail for the quotie_result banner. noop = quiet no-op. */
+function callbackDetailFor(
+  outcome: string,
+  noop: boolean | undefined,
+  warnings: string[] | undefined,
+): string | undefined {
+  if (noop) return "no existing lead — nothing to move";
+  const label =
+    outcome === "requires_quoting" ? "Pipeline: added to Requires Quoting"
+    : outcome === "callback_requested" ? "Pipeline: parked (call back)"
+    : outcome === "no_answer" ? "Pipeline: logged no-answer"
+    : outcome === "voicemail" ? "Pipeline: logged voicemail"
+    : outcome === "lost" ? "Pipeline: moved to Lost"
+    : "Pipeline updated";
+  const parts = [label];
+  if (warnings?.length) parts.push(warnings.join("; "));
+  return parts.join(" · ");
 }
 
 export type CompleteSiteVisitInput = {
@@ -499,20 +542,20 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
       // Client/server disagree (config changed mid-session) — skip, don't guess.
       visitRes = { ok: false, detail: "Quotie action changed — reload and retry" };
     } else if (action.type === "callback") {
-      // Pipeline callback (e.g. Requires Quoting) — moves the Quotie lead into
-      // the matching pipeline column. notes carries the free-text EOD detail.
+      // Pipeline callback — moves the Quotie lead into the matching column.
+      // notes carries the free-text EOD detail; the label is outcome-specific.
+      const outcome = action.outcome || "requires_quoting";
       const res = await createQuotieCallback(quotieConfig, {
-        outcome: action.outcome || "requires_quoting",
+        outcome,
         ghl_contact_id: quotieGhlContactId,
         notes: input.quotie.notes,
         salesPersonName,
         assign_to: action.assign_to,
-        callback_reason: "Requires quoting (EOD log)",
+        callback_reason: callbackReasonFor(outcome, stdOutcome),
+        callback_date: outcome === "callback_requested" ? input.quotie.callback_date : undefined,
       });
       if (res.ok) {
-        const parts = ["Pipeline: added to Requires Quoting"];
-        if (res.warnings?.length) parts.push(res.warnings.join("; "));
-        visitRes = { ok: true, detail: parts.join(" · ") };
+        visitRes = { ok: true, detail: callbackDetailFor(outcome, res.noop, res.warnings) };
       } else {
         visitRes = { ok: false, detail: res.error };
       }
@@ -558,6 +601,35 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
         ghl_contact_id: quotieGhlContactId,
       });
       visitRes = { ok: res.ok, detail: res.ok ? res.warnings?.join("; ") : res.error };
+    }
+  }
+
+  // ── EOD 2 no-answer path (Answered? step, independent of EOD 3) ───────
+  // The no-answer / voicemail signal lives on EOD 2, so it fires even with no
+  // EOD 3 outcome. Skipped when the EOD 3 outcome already resolved to its own
+  // callback action above (never double-post the same contact). Re-resolved
+  // server-side from eod_fields — the client only requests it via a flag.
+  if (
+    !visitRes &&
+    input.quotie_answered_callback &&
+    input.event_type === "eod_update" &&
+    input.eod_fields &&
+    quotieConfig?.api_key
+  ) {
+    const outcomeAction = resolveQuotieAction(input.eod_fields.std_outcome || "", quotieConfig);
+    const eod3IsCallback = outcomeAction?.type === "callback";
+    const answeredOutcome = resolveAnsweredCallback(input.eod_fields.answered || "", quotieConfig);
+    if (answeredOutcome && !eod3IsCallback) {
+      const res = await createQuotieCallback(quotieConfig, {
+        outcome: answeredOutcome,
+        ghl_contact_id: quotieGhlContactId,
+        notes: input.quotie_answered_callback.notes,
+        salesPersonName,
+        callback_reason: callbackReasonFor(answeredOutcome, input.eod_fields.std_outcome || ""),
+      });
+      visitRes = res.ok
+        ? { ok: true, detail: callbackDetailFor(answeredOutcome, res.noop, res.warnings) }
+        : { ok: false, detail: res.error };
     }
   }
 
