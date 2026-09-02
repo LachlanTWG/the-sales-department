@@ -39,6 +39,12 @@ export function formatCurrency(n: number): string {
   return `$${Math.round(n)}`;
 }
 
+/** CPC and similar unit costs — always dollars and cents. */
+export function formatCpc(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  return `$${n.toFixed(2)}`;
+}
+
 export const EVENT_LABELS: Record<string, string> = {
   eod_update: "EOD updates",
   quote_sent: "Quotes sent",

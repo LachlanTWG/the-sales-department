@@ -364,9 +364,14 @@ export function adsScorecard(from: string, to: string, opts?: ScoreGenOpts): Sco
       group("g-meta", "Meta", n),
       row("spend", "Ad spend", "money", spend, { highlight: true }),
       row("imps", "Impressions", "int", imps),
-      row("clicks", "Link clicks", "int", clicks),
+      row("clicks", "Clicks (all)", "int", clicks),
       row("ctr", "Click-through rate", "pct", zip(i => rate(num(clicks[i]), num(imps[i]))), { highlight: true }),
       row("cpc", "Cost per click", "money", zip(i => rate(num(spend[i]), num(clicks[i]))), { highlight: true, total: "avg" }),
+      row("link_clicks", "Link clicks", "int", zip(i => Math.round(num(clicks[i]) * 0.72))),
+      row("cplc", "Cost per link click", "money", zip(i => {
+        const lc = Math.round(num(clicks[i]) * 0.72);
+        return rate(num(spend[i]), lc);
+      }), { highlight: true, total: "avg" }),
       row("cpm", "Cost per 1,000 impressions", "money", zip(i => num(imps[i]) > 0 ? (num(spend[i]) / num(imps[i])) * 1000 : null), { total: "avg" }),
       row("lp", "Landing page views", "int", lpViews),
       row("cplp", "Cost per landing page view", "money", zip(i => rate(num(spend[i]), num(lpViews[i]))), { total: "avg" }),

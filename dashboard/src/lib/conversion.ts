@@ -142,10 +142,14 @@ export type PaidCampaignRow = {
   key: string;
   label: string;
   spend: number;
+  clicks: number;
+  linkClicks: number;
   leads: number;
   quotes: number;
   wins: number;
   wonValue: number;
+  cpc: number | null;
+  cplc: number | null;
   cpl: number | null;
   cpa: number | null;
   roas: number | null;
@@ -153,10 +157,14 @@ export type PaidCampaignRow = {
 
 export type PaidAttribution = {
   spend: number;
+  clicks: number;
+  linkClicks: number;
   leads: number;
   quotes: number;
   wins: number;
   wonValue: number;
+  cpc: number | null;
+  cplc: number | null;
   cpl: number | null;
   cpa: number | null;
   roas: number | null;
@@ -193,7 +201,13 @@ function campaignLabel(r: {
   return (r.utm_campaign || r.campaign || r.source || "").trim() || "Unattributed";
 }
 
-type SpendRow = { campaign_id: string | null; campaign_name: string | null; spend: number | string };
+type SpendRow = {
+  campaign_id: string | null;
+  campaign_name: string | null;
+  spend: number | string;
+  clicks?: number | string | null;
+  link_clicks?: number | string | null;
+};
 type AdAccountRow = {
   pixel_id: string | null;
   meta_ad_account_id: string | null;
@@ -218,7 +232,8 @@ function paidFromRows(
   const bump = (label: string, campaignId: string | null) => {
     const key = (campaignId || label).toLowerCase();
     const row = buckets.get(key) || {
-      key, label, spend: 0, leads: 0, quotes: 0, wins: 0, wonValue: 0, cpl: null, cpa: null, roas: null,
+      key, label, spend: 0, clicks: 0, linkClicks: 0, leads: 0, quotes: 0, wins: 0, wonValue: 0,
+      cpc: null, cplc: null, cpl: null, cpa: null, roas: null,
     };
     buckets.set(key, row);
     return row;
@@ -238,9 +253,15 @@ function paidFromRows(
   }
 
   let spendTotal = 0;
+  let clicksTotal = 0;
+  let linkClicksTotal = 0;
   for (const s of spendRows) {
     const spend = Number(s.spend) || 0;
+    const clicks = Number(s.clicks) || 0;
+    const linkClicks = Number(s.link_clicks) || 0;
     spendTotal += spend;
+    clicksTotal += clicks;
+    linkClicksTotal += linkClicks;
     const label = (s.campaign_name || s.campaign_id || "Unattributed").trim();
     const id = s.campaign_id || null;
     const match =
@@ -248,12 +269,16 @@ function paidFromRows(
       [...buckets.values()].find(b => b.label.toLowerCase() === label.toLowerCase()) ||
       bump(label, id);
     match.spend += spend;
+    match.clicks += clicks;
+    match.linkClicks += linkClicks;
     if (id && match.label === "Unattributed") match.label = label;
   }
 
   const campaigns = [...buckets.values()]
     .map(r => ({
       ...r,
+      cpc: r.clicks > 0 ? r.spend / r.clicks : null,
+      cplc: r.linkClicks > 0 ? r.spend / r.linkClicks : null,
       cpl: r.leads > 0 ? r.spend / r.leads : null,
       cpa: r.wins > 0 ? r.spend / r.wins : null,
       roas: r.spend > 0 ? r.wonValue / r.spend : null,
@@ -267,10 +292,14 @@ function paidFromRows(
 
   return {
     spend: spendTotal,
+    clicks: clicksTotal,
+    linkClicks: linkClicksTotal,
     leads,
     quotes,
     wins,
     wonValue,
+    cpc: clicksTotal > 0 ? spendTotal / clicksTotal : null,
+    cplc: linkClicksTotal > 0 ? spendTotal / linkClicksTotal : null,
     cpl: leads > 0 ? spendTotal / leads : null,
     cpa: wins > 0 ? spendTotal / wins : null,
     roas: spendTotal > 0 ? wonValue / spendTotal : null,
@@ -297,7 +326,7 @@ export async function loadPaidAttribution(
       .limit(8000),
     supabase
       .from("ad_spend")
-      .select("campaign_id, campaign_name, spend")
+      .select("campaign_id, campaign_name, spend, clicks, link_clicks")
       .eq("company_id", opts.companyId)
       .gte("spend_on", opts.from)
       .lte("spend_on", opts.to),
@@ -332,7 +361,7 @@ export type ConversionClientRow = {
 export type ConversionPortfolio = {
   from: string;
   to: string;
-  totals: Pick<PaidAttribution, "spend" | "leads" | "quotes" | "wins" | "wonValue" | "cpl" | "cpa" | "roas">;
+  totals: Pick<PaidAttribution, "spend" | "clicks" | "linkClicks" | "leads" | "quotes" | "wins" | "wonValue" | "cpc" | "cplc" | "cpl" | "cpa" | "roas">;
   funnel: ConversionSnapshot["funnel"];
   clients: ConversionClientRow[];
   recent: (ConversionEventRow & { companyName: string; companySlug: string })[];
@@ -365,8 +394,8 @@ export async function loadConversionPortfolio(
   const companies = await listCompanies(supabase);
   const ids = companies.map(c => c.id);
   const emptyTotals = {
-    spend: 0, leads: 0, quotes: 0, wins: 0, wonValue: 0,
-    cpl: null as number | null, cpa: null as number | null, roas: null as number | null,
+    spend: 0, clicks: 0, linkClicks: 0, leads: 0, quotes: 0, wins: 0, wonValue: 0,
+    cpc: null as number | null, cplc: null as number | null, cpl: null as number | null, cpa: null as number | null, roas: null as number | null,
   };
   if (ids.length === 0) {
     return {
@@ -394,7 +423,7 @@ export async function loadConversionPortfolio(
     pageAll<SpendRow & { company_id: string }>((from, to) =>
       supabase
         .from("ad_spend")
-        .select("company_id, campaign_id, campaign_name, spend")
+        .select("company_id, campaign_id, campaign_name, spend, clicks, link_clicks")
         .in("company_id", ids)
         .gte("spend_on", opts.from)
         .lte("spend_on", opts.to)
@@ -472,6 +501,8 @@ export async function loadConversionPortfolio(
   );
 
   const spend = clients.reduce((s, c) => s + c.paid.spend, 0);
+  const clicks = clients.reduce((s, c) => s + c.paid.clicks, 0);
+  const linkClicks = clients.reduce((s, c) => s + c.paid.linkClicks, 0);
   const leads = clients.reduce((s, c) => s + c.paid.leads, 0);
   const quotes = clients.reduce((s, c) => s + c.paid.quotes, 0);
   const wins = clients.reduce((s, c) => s + c.paid.wins, 0);
@@ -494,10 +525,14 @@ export async function loadConversionPortfolio(
     to: opts.to,
     totals: {
       spend,
+      clicks,
+      linkClicks,
       leads,
       quotes,
       wins,
       wonValue,
+      cpc: clicks > 0 ? spend / clicks : null,
+      cplc: linkClicks > 0 ? spend / linkClicks : null,
       cpl: leads > 0 ? spend / leads : null,
       cpa: wins > 0 ? spend / wins : null,
       roas: spend > 0 ? wonValue / spend : null,

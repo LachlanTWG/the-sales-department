@@ -88,12 +88,18 @@ const SEEDS: ClientSeed[] = [
 ];
 
 function paidFromSeed(s: ClientSeed): PaidAttribution {
+  const clicks = Math.round(s.spend / 1.35);
+  const linkClicks = Math.round(clicks * 0.72);
   return {
     spend: s.spend,
+    clicks,
+    linkClicks,
     leads: s.leads,
     quotes: s.quotes,
     wins: s.wins,
     wonValue: s.wonValue,
+    cpc: clicks > 0 ? s.spend / clicks : null,
+    cplc: linkClicks > 0 ? s.spend / linkClicks : null,
     cpl: s.leads > 0 && s.spend > 0 ? s.spend / s.leads : null,
     cpa: s.wins > 0 && s.spend > 0 ? s.spend / s.wins : null,
     roas: s.spend > 0 ? s.wonValue / s.spend : null,
@@ -102,10 +108,14 @@ function paidFromSeed(s: ClientSeed): PaidAttribution {
         key: `${s.slug}-prospecting`,
         label: "Prospecting",
         spend: Math.round(s.spend * 0.65),
+        clicks: Math.round(clicks * 0.62),
+        linkClicks: Math.round(linkClicks * 0.62),
         leads: Math.round(s.leads * 0.7),
         quotes: Math.round(s.quotes * 0.6),
         wins: Math.max(0, s.wins - 1),
         wonValue: Math.round(s.wonValue * 0.7),
+        cpc: null,
+        cplc: null,
         cpl: null,
         cpa: null,
         roas: null,
@@ -114,16 +124,22 @@ function paidFromSeed(s: ClientSeed): PaidAttribution {
         key: `${s.slug}-retarget`,
         label: "Retargeting",
         spend: s.spend - Math.round(s.spend * 0.65),
+        clicks: clicks - Math.round(clicks * 0.62),
+        linkClicks: linkClicks - Math.round(linkClicks * 0.62),
         leads: s.leads - Math.round(s.leads * 0.7),
         quotes: s.quotes - Math.round(s.quotes * 0.6),
         wins: Math.min(1, s.wins),
         wonValue: s.wonValue - Math.round(s.wonValue * 0.7),
+        cpc: null,
+        cplc: null,
         cpl: null,
         cpa: null,
         roas: null,
       },
     ].map(r => ({
       ...r,
+      cpc: r.clicks > 0 && r.spend > 0 ? r.spend / r.clicks : null,
+      cplc: r.linkClicks > 0 && r.spend > 0 ? r.spend / r.linkClicks : null,
       cpl: r.leads > 0 && r.spend > 0 ? r.spend / r.leads : null,
       cpa: r.wins > 0 && r.spend > 0 ? r.spend / r.wins : null,
       roas: r.spend > 0 ? r.wonValue / r.spend : null,
@@ -174,6 +190,8 @@ export function betaPortfolio(opts: { from: string; to: string }): ConversionPor
   })).sort((a, b) => b.paid.spend - a.paid.spend || b.paid.wonValue - a.paid.wonValue);
 
   const spend = clients.reduce((n, c) => n + c.paid.spend, 0);
+  const clicks = clients.reduce((n, c) => n + c.paid.clicks, 0);
+  const linkClicks = clients.reduce((n, c) => n + c.paid.linkClicks, 0);
   const leads = clients.reduce((n, c) => n + c.paid.leads, 0);
   const quotes = clients.reduce((n, c) => n + c.paid.quotes, 0);
   const wins = clients.reduce((n, c) => n + c.paid.wins, 0);
@@ -189,7 +207,9 @@ export function betaPortfolio(opts: { from: string; to: string }): ConversionPor
     from: opts.from,
     to: opts.to,
     totals: {
-      spend, leads, quotes, wins, wonValue,
+      spend, clicks, linkClicks, leads, quotes, wins, wonValue,
+      cpc: clicks > 0 && spend > 0 ? spend / clicks : null,
+      cplc: linkClicks > 0 && spend > 0 ? spend / linkClicks : null,
       cpl: leads > 0 && spend > 0 ? spend / leads : null,
       cpa: wins > 0 && spend > 0 ? spend / wins : null,
       roas: spend > 0 ? wonValue / spend : null,
@@ -231,8 +251,8 @@ export function betaPaid(companyId: string): PaidAttribution {
   const s = SEEDS.find(x => x.id === companyId);
   if (!s) {
     return {
-      spend: 0, leads: 0, quotes: 0, wins: 0, wonValue: 0,
-      cpl: null, cpa: null, roas: null, campaigns: [],
+      spend: 0, clicks: 0, linkClicks: 0, leads: 0, quotes: 0, wins: 0, wonValue: 0,
+      cpc: null, cplc: null, cpl: null, cpa: null, roas: null, campaigns: [],
       connected: false, pixelId: null, adAccountId: null,
     };
   }

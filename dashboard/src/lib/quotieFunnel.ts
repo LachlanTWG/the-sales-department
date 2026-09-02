@@ -62,8 +62,10 @@ export type QuotieSnapshot = {
     spend: number;
     impressions: number;
     clicks: number;
+    linkClicks: number;
     ctr: number;
     cpc: number;
+    cplc: number;
     cpm: number;
     lpViews: number;
     costPerLpView: number | null;
@@ -198,6 +200,7 @@ export function sampleQuotieSnapshot(from: string, to: string): QuotieSnapshot {
   const spend = n(8400);
   const impressions = n(420_000);
   const clicks = n(6200);
+  const linkClicks = n(4460);
   const lpViews = n(5400);
   const optIns = n(300);
   const vslViews = n(210);
@@ -313,8 +316,10 @@ export function sampleQuotieSnapshot(from: string, to: string): QuotieSnapshot {
       spend,
       impressions,
       clicks,
+      linkClicks,
       ctr: pct(clicks, impressions),
       cpc: spend / clicks,
+      cplc: spend / linkClicks,
       cpm: (spend / impressions) * 1000,
       lpViews,
       costPerLpView: cost(spend, lpViews),

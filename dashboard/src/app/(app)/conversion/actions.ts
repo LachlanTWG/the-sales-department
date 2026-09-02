@@ -102,14 +102,22 @@ export async function syncMetaSpend(formData: FormData): Promise<{ ok: true; day
   const url = new URL(`https://graph.facebook.com/v21.0/${actId}/insights`);
   url.searchParams.set("level", "campaign");
   url.searchParams.set("time_increment", "1");
-  url.searchParams.set("fields", "campaign_id,campaign_name,spend,impressions,clicks,date_start");
+  url.searchParams.set("fields", "campaign_id,campaign_name,spend,impressions,clicks,inline_link_clicks,date_start");
   url.searchParams.set("time_range", JSON.stringify({ since: from, until: to }));
   url.searchParams.set("access_token", acct.meta_access_token);
   url.searchParams.set("limit", "500");
 
   const res = await fetch(url.toString());
   const json = await res.json() as {
-    data?: { campaign_id?: string; campaign_name?: string; spend?: string; impressions?: string; clicks?: string; date_start?: string }[];
+    data?: {
+      campaign_id?: string;
+      campaign_name?: string;
+      spend?: string;
+      impressions?: string;
+      clicks?: string;
+      inline_link_clicks?: string;
+      date_start?: string;
+    }[];
     error?: { message?: string };
   };
   if (!res.ok || json.error) {
@@ -133,6 +141,7 @@ export async function syncMetaSpend(formData: FormData): Promise<{ ok: true; day
       spend: Number(row.spend) || 0,
       impressions: Number(row.impressions) || 0,
       clicks: Number(row.clicks) || 0,
+      link_clicks: Number(row.inline_link_clicks) || 0,
     })));
     if (error) return { ok: false, error: error.message };
   }

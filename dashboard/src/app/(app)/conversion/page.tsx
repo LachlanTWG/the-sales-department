@@ -6,7 +6,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getViewer, requireAppAccess } from "@/lib/viewer";
 import { isBeta } from "@/lib/beta";
 import { EVENT_LABEL, loadConversionPortfolio } from "@/lib/conversion";
-import { formatCurrency, SYDNEY_TZ, todayInTz } from "@/lib/format";
+import { formatCpc, formatCurrency, SYDNEY_TZ, todayInTz } from "@/lib/format";
 import { mondayOf, addDaysIso, shortDate } from "@/lib/dates";
 import { LiveBadge } from "../LiveBadge";
 import { QuotieDashboard } from "./QuotieDashboard";
@@ -107,8 +107,18 @@ export default async function ConversionHomePage({
         ))}
       </div>
 
-      <section className="grid gap-3 grid-cols-2 md:grid-cols-4">
+      <section className="grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
         <Hero label="Ad spend" value={formatCurrency(portfolio.totals.spend)} hint="Meta + manual" />
+        <Hero
+          label="Cost per click"
+          value={portfolio.totals.cpc != null ? formatCpc(portfolio.totals.cpc) : "—"}
+          hint={portfolio.totals.clicks > 0 ? `${portfolio.totals.clicks.toLocaleString()} all clicks` : "Needs Meta clicks"}
+        />
+        <Hero
+          label="Cost per link click"
+          value={portfolio.totals.cplc != null ? formatCpc(portfolio.totals.cplc) : "—"}
+          hint={portfolio.totals.linkClicks > 0 ? `${portfolio.totals.linkClicks.toLocaleString()} link clicks` : "Re-sync Meta for link clicks"}
+        />
         <Hero
           label="Leads"
           value={String(portfolio.totals.leads)}
@@ -223,6 +233,10 @@ export default async function ConversionHomePage({
                     <Mini label="ROAS" value={c.paid.roas != null ? `${c.paid.roas.toFixed(1)}x` : "—"} accent />
                   </div>
                   <div className="mt-2 text-[11px] text-slate-500">
+                    {c.paid.cpc != null ? `${formatCpc(c.paid.cpc)} CPC` : "No CPC"}
+                    {" · "}
+                    {c.paid.cplc != null ? `${formatCpc(c.paid.cplc)} CPLC` : "No CPLC"}
+                    {" · "}
                     {c.paid.cpl != null ? `${formatCurrency(c.paid.cpl)} CPL` : "No CPL"}
                     {" · "}
                     {c.paid.cpa != null ? `${formatCurrency(c.paid.cpa)} CPA` : "No CPA"}
@@ -243,6 +257,8 @@ export default async function ConversionHomePage({
               <tr>
                 <th className="px-4 py-2 text-left font-normal">Client</th>
                 <th className="px-4 py-2 text-right font-normal">Spend</th>
+                <th className="px-4 py-2 text-right font-normal">CPC</th>
+                <th className="px-4 py-2 text-right font-normal">CPLC</th>
                 <th className="px-4 py-2 text-right font-normal">Leads</th>
                 <th className="px-4 py-2 text-right font-normal">CPL</th>
                 <th className="px-4 py-2 text-right font-normal">Quotes</th>
@@ -263,6 +279,12 @@ export default async function ConversionHomePage({
                     {!c.paid.connected && <div className="text-[10px] text-amber-700">Meta not connected</div>}
                   </td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-slate-800">{formatCurrency(c.paid.spend)}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-slate-500">
+                    {c.paid.cpc != null ? formatCpc(c.paid.cpc) : "—"}
+                  </td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-slate-500">
+                    {c.paid.cplc != null ? formatCpc(c.paid.cplc) : "—"}
+                  </td>
                   <td className="px-4 py-2.5 text-right tabular-nums">{c.paid.leads}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-slate-500">
                     {c.paid.cpl != null ? formatCurrency(c.paid.cpl) : "—"}

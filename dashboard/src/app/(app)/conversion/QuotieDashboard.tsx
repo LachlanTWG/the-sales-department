@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { formatCurrency } from "@/lib/format";
+import { formatCpc, formatCurrency } from "@/lib/format";
 import {
   formatKpi,
   formatPct,
@@ -99,8 +99,18 @@ function OverviewBody({ snap, top }: { snap: QuotieSnapshot; top: QuotieSnapshot
         ))}
       </section>
 
-      <section className="grid gap-3 grid-cols-2 md:grid-cols-4 xl:grid-cols-8">
+      <section className="grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
         <Hero label="Ad spend" value={formatCurrency(snap.hero.spend)} />
+        <Hero
+          label="Cost per click"
+          value={snap.meta.cpc > 0 ? formatCpc(snap.meta.cpc) : "—"}
+          hint={`${snap.meta.clicks.toLocaleString()} all clicks`}
+        />
+        <Hero
+          label="Cost per link click"
+          value={snap.meta.cplc > 0 ? formatCpc(snap.meta.cplc) : "—"}
+          hint={`${snap.meta.linkClicks.toLocaleString()} link clicks`}
+        />
         <Hero
           label="Leads / day"
           value={snap.hero.leadsPerDay.toFixed(1)}

@@ -4,7 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getViewer, requireAppAccess, gateCompanySlug } from "@/lib/viewer";
 import { listCompanies } from "@/lib/queries";
 import { loadConversionSnapshot, loadPaidAttribution, EVENT_LABEL } from "@/lib/conversion";
-import { formatCurrency, todayInTz } from "@/lib/format";
+import { formatCpc, formatCurrency, todayInTz } from "@/lib/format";
 import { mondayOf, addDaysIso, shortDate } from "@/lib/dates";
 import { isBeta } from "@/lib/beta";
 import { addManualSpendForm, saveAdAccountForm, syncMetaSpendForm } from "../actions";
@@ -115,8 +115,18 @@ export default async function ConversionClientPage({
         ))}
       </div>
 
-      <section className="grid gap-3 grid-cols-2 md:grid-cols-4">
+      <section className="grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
         <Hero label="Ad spend" value={formatCurrency(paid.spend)} hint={paid.connected ? "Meta sync" : "Add spend or connect Meta"} />
+        <Hero
+          label="Cost per click"
+          value={paid.cpc != null ? formatCpc(paid.cpc) : "—"}
+          hint={paid.clicks > 0 ? `${paid.clicks.toLocaleString()} all clicks` : "Needs Meta clicks"}
+        />
+        <Hero
+          label="Cost per link click"
+          value={paid.cplc != null ? formatCpc(paid.cplc) : "—"}
+          hint={paid.linkClicks > 0 ? `${paid.linkClicks.toLocaleString()} link clicks` : "Re-sync Meta for link clicks"}
+        />
         <Hero label="Leads" value={String(paid.leads)} hint={paid.cpl != null ? `${formatCurrency(paid.cpl)} CPL` : "First-touch"} />
         <Hero label="Wins" value={String(paid.wins)} hint={paid.cpa != null ? `${formatCurrency(paid.cpa)} CPA` : "First-touch"} />
         <Hero label="ROAS" value={paid.roas != null ? `${paid.roas.toFixed(2)}x` : "—"} hint={formatCurrency(paid.wonValue) + " won"} />
@@ -133,6 +143,10 @@ export default async function ConversionClientPage({
               <tr>
                 <th className="px-4 py-2 text-left font-normal">Campaign / source</th>
                 <th className="px-4 py-2 text-right font-normal">Spend</th>
+                <th className="px-4 py-2 text-right font-normal">Clicks</th>
+                <th className="px-4 py-2 text-right font-normal">CPC</th>
+                <th className="px-4 py-2 text-right font-normal">Link clicks</th>
+                <th className="px-4 py-2 text-right font-normal">CPLC</th>
                 <th className="px-4 py-2 text-right font-normal">Leads</th>
                 <th className="px-4 py-2 text-right font-normal">CPL</th>
                 <th className="px-4 py-2 text-right font-normal">Quotes</th>
@@ -145,13 +159,17 @@ export default async function ConversionClientPage({
             <tbody>
               {paid.campaigns.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-8 text-center text-slate-500">No attributed events in this range.</td>
+                  <td colSpan={13} className="px-4 py-8 text-center text-slate-500">No attributed events in this range.</td>
                 </tr>
               ) : (
                 paid.campaigns.map(r => (
                   <tr key={r.key} className="border-t border-slate-200">
                     <td className="px-4 py-2 text-slate-800">{r.label}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{formatCurrency(r.spend)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{r.clicks || "—"}</td>
+                    <td className="px-4 py-2 text-right tabular-nums text-slate-500">{r.cpc != null ? formatCpc(r.cpc) : "—"}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{r.linkClicks || "—"}</td>
+                    <td className="px-4 py-2 text-right tabular-nums text-slate-500">{r.cplc != null ? formatCpc(r.cplc) : "—"}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{r.leads}</td>
                     <td className="px-4 py-2 text-right tabular-nums text-slate-500">{r.cpl != null ? formatCurrency(r.cpl) : "—"}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{r.quotes}</td>
