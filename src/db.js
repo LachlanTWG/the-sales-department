@@ -373,6 +373,38 @@ async function insertWebhookEvent(params) {
  * Upsert an open pending site visit (GHL calendar book → popup to-log queue).
  * Dedupes on (company, contact_id, appointment_raw) while still open.
  */
+/**
+ * Open (un-logged) calendar bookings with a real appointment time. These are
+ * real appointments the exec just hasn't popup-logged yet, so the site-visit
+ * schedule must count them. Appointment is emitted as the same naive
+ * wall-clock string fetchActivityGrid uses (client wall-clock tagged UTC),
+ * so both sources compare identically.
+ */
+async function fetchOpenPendingSiteVisits(companyName) {
+  const client = await getPool().connect();
+  try {
+    const companyId = await resolveCompanyId(client, companyName);
+    if (!companyId) throw new Error(`Unknown company: ${companyName}`);
+    const { rows } = await client.query(
+      `select
+         coalesce(contact_name, '') as contact_name,
+         coalesce(contact_address, '') as contact_address,
+         coalesce(sales_person_name, '') as sales_person_name,
+         to_char(appointment_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS') as appointment_date_time
+       from pending_site_visits
+       where company_id = $1
+         and resolved_at is null
+         and dismissed_at is null
+         and appointment_at is not null
+       order by appointment_at`,
+      [companyId]
+    );
+    return rows;
+  } finally {
+    client.release();
+  }
+}
+
 async function upsertPendingSiteVisit(params) {
   if (!isEnabled()) return { skipped: true };
   const client = await getPool().connect();
@@ -506,6 +538,7 @@ module.exports = {
   insertActivity,
   insertReport,
   insertWebhookEvent,
+  fetchOpenPendingSiteVisits,
   upsertPendingSiteVisit,
   resolvePendingSiteVisit,
   resolveCompanyId,

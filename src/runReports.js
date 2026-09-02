@@ -486,9 +486,35 @@ async function sendSiteVisitNotification(company) {
   console.log(`[SITE VISITS] ${company.name} — ${today}`);
 
   const activityData = await db.fetchActivityGrid(company.name);
-  const bookings = parseActivities(activityData).filter(a =>
+  const logged = parseActivities(activityData).filter(a =>
     a['Event Type'] === 'Site Visit Booked' && a['Appointment Date Time']
   );
+
+  // Booked-but-not-yet-logged calendar visits (open pending_site_visits) are
+  // real appointments too — merge them in so the schedule mirrors the
+  // calendar, not just what execs have popup-logged. On a (name, day) clash
+  // the logged activity wins.
+  const pending = await db.fetchOpenPendingSiteVisits(company.name).catch(e => {
+    console.error(`  Pending visits: ${e.message}`);
+    return [];
+  });
+  const visitKey = (name, dtStr) =>
+    `${String(name || '').trim().toLowerCase()}|${String(dtStr || '').slice(0, 10)}`;
+  const seenVisits = new Set(logged.map(b => visitKey(b['Contact Name'], b['Appointment Date Time'])));
+  const bookings = [...logged];
+  for (const p of pending) {
+    if (!p.appointment_date_time) continue;
+    const key = visitKey(p.contact_name, p.appointment_date_time);
+    if (seenVisits.has(key)) continue;
+    seenVisits.add(key);
+    bookings.push({
+      'Contact Name': p.contact_name,
+      'Contact Address': p.contact_address,
+      'Appointment Date Time': p.appointment_date_time,
+      'Sales Person': p.sales_person_name,
+    });
+  }
+
   if (bookings.length === 0) {
     console.log(`  No site visit data found.`);
     return;
