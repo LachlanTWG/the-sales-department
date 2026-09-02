@@ -72,3 +72,18 @@ Mirroring the existing `createQuotieTask` / `createQuotieSiteVisit` pattern in `
 - `.claude/docs/integrations/external-api.md` — full `POST /v1/callbacks` contract
 - `.claude/docs/features/pipeline-overview.md` — stage derivation rules
 - `.claude/docs/integrations/eod-creator.md` — integration state + rollout runbook
+
+## Full intake mapping — SHIPPED (b8b808d, 2026-09-02)
+
+The EOD selector is now the front door for Quotie's pipeline:
+
+| EOD step | Selection | Quotie effect |
+|---|---|---|
+| EOD 2 | Didn't Answer | `no_answer` — creates the lead on first strike (Day 1), bumps Day N after, auto-abandon at 5. Fires even without an EOD 3 outcome; skipped when EOD 3 itself maps to a callback |
+| EOD 3 | Requires Quoting | `requires_quoting` — Requires Quoting column w/ Create Quote button |
+| EOD 3 | Not a Good Time to Talk | `callback_requested` — Parked column (replaces the "Call back" task; optional "Call back on" date field feeds `callback_date`) |
+| EOD 3 | Lost - * / DQ - * / Abandoned - * (14 outcomes) | `lost` — closes the lead; quiet `{noop:true}` when the contact has no lead |
+| EOD 3 | Book Site Visit / Waiting on Photos | unchanged (api-site-visits / api-tasks) |
+| EOD 3 | Quote Sent, Verbal Confirmation, Not Ready Yet ×2 | unmapped (candidates: Verbal Confirmation → Quotie's Verbal Yes; Not Ready Yet → Parked — both need small api-callbacks additions first) |
+
+Overrides: per-company `quotie_config.actions` (EOD 3) + new `quotie_config.answered_callbacks` (EOD 2), `null` disables. Note: EOD 2 has no voicemail selection today — defensive `voicemail` mapping exists if one is ever added.
