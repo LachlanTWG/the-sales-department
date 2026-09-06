@@ -111,6 +111,27 @@ function signState(payload) {
   return `${body}.${sig}`;
 }
 
+/** Human-readable OAuth error from the provider callback query string. */
+function describeOAuthError(searchParams) {
+  const err = (searchParams.get('error') || '').trim();
+  const desc = (searchParams.get('error_description') || '').trim();
+  if (!err && !desc) return null;
+  const combined = `${err} ${desc}`.toLowerCase();
+  if (
+    combined.includes('access_denied') ||
+    combined.includes('verification') ||
+    combined.includes('unverified') ||
+    combined.includes('not completed')
+  ) {
+    return (
+      'Google blocked this mailbox (403 access_denied). The Gmail app is still in testing, ' +
+      'so only approved testers can connect. Add this Google address as a test user in ' +
+      'Google Cloud → Auth → Audience, then connect again.'
+    );
+  }
+  return (desc || err).slice(0, 200);
+}
+
 function verifyState(state) {
   const secret = stateSecret();
   if (!secret) throw new Error('WEBHOOK_SECRET / EOD_ENTRY_SECRET required for mailbox OAuth state');
@@ -1213,6 +1234,7 @@ module.exports = {
   buildAuthUrl,
   authUrlForState,
   handleOAuthCallback,
+  describeOAuthError,
   syncAllAccounts,
   syncAccount,
   listActiveAccounts,

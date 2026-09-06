@@ -27,6 +27,7 @@ export function canonicalisePersonName(name) {
 // ─── Outcome normalisation ───────────────────────────────────────────
 export const OUTCOME_ALIASES = {
   'Not Ready to Proceed w. Job': 'Not Ready Yet - Post Quote',
+  'Not Ready Yet - Pre Quote': 'Not Ready Yet - Pre-Quote',
   'Not Ready for Site Visit': 'Not Ready Yet - Pre-Quote',
   'Rescheduled Site Visit': 'Not Ready Yet - Pre-Quote',
   'Rough Figures Sent': 'Requires Quoting',
@@ -237,6 +238,28 @@ export function buildGHLJobWonActivity(body, tz, roster, now = new Date()) {
   };
 }
 
+function collectVisitLabels(body) {
+  if (!body || typeof body !== 'object') return [];
+  const cal = body.calendar && typeof body.calendar === 'object' ? body.calendar : {};
+  const appt = body.appointment && typeof body.appointment === 'object' ? body.appointment : {};
+  const custom = body.customData && typeof body.customData === 'object' ? body.customData : {};
+  return [
+    cal.name, cal.title, cal.calendarName, cal.calendar_name, cal.calendarTitle,
+    appt.title, appt.name, appt.calendarName, appt.calendar_name,
+    body.title, body.calendarName, body.calendar_name,
+    body.appointmentTitle, body.appointment_title, body.appointmentName,
+    custom.calendar_name, custom.calendarName, custom.title, custom.appointment_title,
+  ].map(v => String(v || '').trim()).filter(Boolean);
+}
+
+export function isVirtualVisitPayload(body) {
+  return collectVisitLabels(body).some(label => /virtual/i.test(label));
+}
+
+export function visitKindFromPayload(body) {
+  return isVirtualVisitPayload(body) ? 'virtual' : 'in_person';
+}
+
 /** /webhook/ghl/site-visit */
 export function buildGHLSiteVisitActivity(body, tz, roster, now = new Date()) {
   const salesPersonName = resolveGHLSalesPerson(body, roster);
@@ -255,8 +278,49 @@ export function buildGHLSiteVisitActivity(body, tz, roster, now = new Date()) {
       contactAddress: s(deepFindField(body, 'address1') || ''),
       contactId: s(deepFindField(body, 'contact_id') || body.id || ''),
       appointmentAt: appointmentDT,
+      visitKind: visitKindFromPayload(body),
       source: 'ghl',
     },
+  };
+}
+
+/** Fields for pending_site_visits (popup queue) from a GHL calendar webhook. */
+export function buildPendingSiteVisit(body, tz, roster, now = new Date()) {
+  const cal = (body && body.calendar && typeof body.calendar === 'object') ? body.calendar : {};
+  const appointmentDisplay = s(
+    deepFindField(body, 'Appointment Date Time')
+    || deepFindField(body, 'Appointment Date Time - Automated')
+    || cal.startTime
+    || '',
+  );
+  const appointmentStart = s(
+    cal.startTime || deepFindField(body, 'Appointment Start Time - Automated') || '',
+  );
+  const contactName = s(
+    deepFindField(body, 'full_name')
+    || body.full_name
+    || body.contactName
+    || body.contact_name
+    || [body.firstName || body.first_name, body.lastName || body.last_name].filter(Boolean).join(' ')
+    || '',
+  );
+  const contactId = s(
+    deepFindField(body, 'contact_id') || body.contact_id || body.contactId || body.id || '',
+  );
+  return {
+    contactId: contactId || null,
+    contactName: contactName || null,
+    contactAddress: s(deepFindField(body, 'address1') || body.address1 || body.full_address || cal.address || body.address || '') || null,
+    contactPhone: s(body.phone || deepFindField(body, 'phone') || '') || null,
+    contactEmail: s(body.email || deepFindField(body, 'email') || '') || null,
+    salesPersonName: resolveGHLSalesPerson(body, roster) || null,
+    appointmentRaw: appointmentDisplay || appointmentStart || null,
+    appointmentDisplay: appointmentDisplay || appointmentStart || null,
+    appointmentAt: appointmentStart || null,
+    bookedOn: companyToday(tz, now),
+    visitKind: visitKindFromPayload(body),
+    source: 'ghl',
+    rawPayload: body,
   };
 }
 
@@ -329,6 +393,7 @@ export function buildManualActivity(entry) {
       contactAddress: s(entry.contactAddress || ''),
       contactId: s(entry.contactId || ''),
       appointmentAt: s(entry.appointmentDateTime || ''),
+      visitKind: entry.visitKind === 'virtual' ? 'virtual' : (eventType === 'site_visit_booked' ? 'in_person' : null),
       source: 'manual',
     },
   };
@@ -368,5 +433,8 @@ export function toInsertRow(activity, { companyId, salesPersonId, rawPayload }) 
     source: activity.source,
     source_row_id: null,
     raw_payload: rawPayload ?? null,
+    visit_kind: activity.eventType === 'site_visit_booked'
+      ? (activity.visitKind === 'virtual' ? 'virtual' : 'in_person')
+      : null,
   };
 }

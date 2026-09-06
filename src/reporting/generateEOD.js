@@ -1,7 +1,23 @@
 const { getOutcomeNames } = require('../sheets/createCompanySheet');
 const { loadConfig } = require('../config/configLoader');
 const { cleanAddress } = require('./addressFormat');
-const { displayLabel } = require('./displayLabels');
+const { displayLabel, formatDqLine } = require('./displayLabels');
+const { isVirtualVisitKind } = require('../ghl/visitKind');
+
+function virtualTag(virtual) {
+  return virtual ? ' (virtual)' : '';
+}
+
+function siteVisitsHeader(baseName, visits) {
+  const n = (visits || []).length;
+  const v = (visits || []).filter(s => s.virtual).length;
+  if (n === 0 || v === 0) return baseName;
+  return `${baseName} — ${n} (${v} virtual)`;
+}
+
+function rowIsVirtualVisit(activity) {
+  return isVirtualVisitKind(activity['Visit Kind']) || /virtual/i.test(activity['Outcome'] || '');
+}
 
 /**
  * Parse a pipe-delimited outcome string.
@@ -91,6 +107,7 @@ function resolveLeadSource(contactName, contactId, allActivities) {
 // GHL dropdown values that differ from internal outcome names
 const OUTCOME_ALIASES = {
   'Not Ready to Proceed w. Job': 'Not Ready Yet - Post Quote',
+  'Not Ready Yet - Pre Quote': 'Not Ready Yet - Pre-Quote',
   'Not Ready for Site Visit': 'Not Ready Yet - Pre-Quote',
   'Rescheduled Site Visit': 'Not Ready Yet - Pre-Quote',
   'Rough Figures Sent': 'Requires Quoting',
@@ -236,6 +253,7 @@ function countOutcomes(filtered, ownerName, companyName, allActivities, opts) {
   const jobDetails = [];   // { contactName, address, value, source }
   const customNotes = [];  // { contactName, note } — EOD 4 custom outcomes, surfaced verbatim
   const myRq = [];
+  const myBookSv = [];
   const pool = allActivities || filtered || [];
   const roster = rosterNamesFor(companyName);
   const rangeStart = opts.rangeStart;
@@ -265,6 +283,7 @@ function countOutcomes(filtered, ownerName, companyName, allActivities, opts) {
         contactName: activity['Contact Name'],
         address: activity['Contact Address'],
         datetime: activity['Appointment Date Time'],
+        virtual: rowIsVirtualVisit(activity),
       });
       const outcomeName = 'Site Visit Booked';
       if (outcomeName in counts) {
@@ -335,6 +354,9 @@ function countOutcomes(filtered, ownerName, companyName, allActivities, opts) {
         }
         if (actionKey === 'Requires Quoting') {
           myRq.push({ name: contactName, key: sheetContactKey(activity) });
+        }
+        if (actionKey === 'Book Site Visit') {
+          myBookSv.push({ name: contactName, key: sheetContactKey(activity) });
         }
       }
 
@@ -418,13 +440,28 @@ function countOutcomes(filtered, ownerName, companyName, allActivities, opts) {
     a.localeCompare(b, undefined, { sensitivity: 'base' }),
   );
 
-  // Synthetic display count for the Pipeline Progress block. Set directly (not
-  // via outcomes.json) so it never becomes a positional Google Sheet storage
-  // column. "Site Visit Booked" (singular, formula 8) still renders the detailed
-  // list in the 🏠 Site Visits block. Mirrors dashboard messages.ts.
+  const teamVisited = new Set();
+  for (const a of pool) {
+    if (a['Event Type'] !== 'Site Visit Booked' || !inRange(a['Date'])) continue;
+    const key = sheetContactKey(a);
+    if (key) teamVisited.add(key);
+    const n = normalizeName(a['Contact Name']);
+    if (n) teamVisited.add(`name:${n}`);
+  }
+  const visitOpenByName = new Map();
+  for (const b of myBookSv) {
+    if (!b.name) continue;
+    const closed = (b.key && teamVisited.has(b.key)) || teamVisited.has(`name:${normalizeName(b.name)}`);
+    if (!visitOpenByName.has(b.name) || closed) visitOpenByName.set(b.name, !closed);
+  }
+  const visitsOpen = [...visitOpenByName.entries()].filter(([, open]) => open).map(([n]) => n).sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: 'base' }),
+  );
+
+  // Synthetic display count for the 🏠 Site Visits block header.
   counts['Site Visits Booked'] = siteVisits.length;
 
-  return { counts, names, quoteDetails, siteVisits, jobDetails, customNotes, quotingOpen };
+  return { counts, names, quoteDetails, siteVisits, jobDetails, customNotes, quotingOpen, visitsOpen };
 }
 
 /**
@@ -529,10 +566,9 @@ function formatEODLine(outcomeName, formulaTypeId, data, isTeam) {
 
     case 8: { // Site Visit
       if (siteVisits.length === 0) return null;
-      if (isTeam) return `Site Visits Booked: ${siteVisits.length}`;
       const lines = siteVisits.map(sv => {
         const dt = formatVisitDateTime(sv.datetime);
-        return `${sv.contactName} - ${cleanAddress(sv.address) || 'TBC'} - ${dt || 'TBC'}`;
+        return `${sv.contactName} - ${cleanAddress(sv.address) || 'TBC'} - ${dt || 'TBC'}${virtualTag(sv.virtual)}`;
       });
       return lines.join('\n');
     }
@@ -573,21 +609,42 @@ function buildEODMessage(companyName, dateStr, ownerName, data, salesPerson) {
   const lines = [`EOD Report - ${dateFormatted} - ${personLabel} - ${companyName}`];
   lines.push('');
 
+  const isTeam = salesPerson === 'Team';
   for (const block of blocks.eodBlocks) {
     const blockName = block.name.replace('{owner}', ownerName);
     const blockLines = [];
+    const isDq = (block.outcomes || []).some(o => String(o).startsWith('DQ - '))
+      || /disqualified/i.test(blockName);
+
+    if (isDq) {
+      for (const outcomeTpl of block.outcomes || []) {
+        const outcomeName = outcomeTpl.replace('{owner}', ownerName);
+        const count = data.counts[outcomeName] || 0;
+        if (count === 0) continue;
+        const names = isTeam ? [] : (data.names[outcomeName] || []);
+        blockLines.push(formatDqLine(outcomeName, count, names));
+      }
+      if (blockLines.length > 0) {
+        lines.push(...blockLines);
+        lines.push('');
+      }
+      continue;
+    }
 
     for (let outcomeTpl of block.outcomes) {
       const outcomeName = outcomeTpl.replace('{owner}', ownerName);
       const formulaEntry = formulas.outcomeFormulas[outcomeTpl] || { eod: 1 };
       const formulaTypeId = formulaEntry.eod;
 
-      const line = formatEODLine(outcomeName, formulaTypeId, data, salesPerson === 'Team');
+      const line = formatEODLine(outcomeName, formulaTypeId, data, isTeam);
       if (line) blockLines.push(line);
     }
 
     if (blockLines.length > 0) {
-      lines.push(blockName);
+      const heading = (block.outcomes || []).includes('Site Visit Booked')
+        ? siteVisitsHeader(blockName, data.siteVisits)
+        : blockName;
+      lines.push(heading);
       lines.push(...blockLines);
       lines.push('');
     }
@@ -603,6 +660,19 @@ function buildEODMessage(companyName, dateStr, ownerName, data, salesPerson) {
         lines.push('Complete 100%');
       } else {
         lines.push(`Still in need of quote: ${open.length} of ${rqNames.length}`);
+        for (const name of open) lines.push(`- ${name}`);
+      }
+      lines.push('');
+    }
+
+    const bsvNames = [...new Set((data.names['Book Site Visit'] || []).filter(Boolean))];
+    if (bsvNames.length > 0) {
+      const open = data.visitsOpen || [];
+      lines.push('✅ Site visit coverage');
+      if (open.length === 0) {
+        lines.push('Complete 100%');
+      } else {
+        lines.push(`Still in need of log: ${open.length} of ${bsvNames.length}`);
         for (const name of open) lines.push(`- ${name}`);
       }
       lines.push('');

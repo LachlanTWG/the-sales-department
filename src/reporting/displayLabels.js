@@ -11,8 +11,22 @@ const DISPLAY_LABELS = {
   'Direct Lead passed on from Client': 'Direct Lead from Client',
 };
 
-function displayLabel(name) {
-  return DISPLAY_LABELS[name] || name;
+function dqReasonLabel(name) {
+  return String(name || '').replace(/^DQ\s*-\s*/, '');
 }
 
-module.exports = { displayLabel };
+function displayLabel(name) {
+  if (DISPLAY_LABELS[name]) return DISPLAY_LABELS[name];
+  if (typeof name === 'string' && name.startsWith('DQ - ')) return dqReasonLabel(name);
+  return name;
+}
+
+function formatDqLine(outcomeName, count, contactNames) {
+  const reason = dqReasonLabel(outcomeName);
+  const unique = [...new Set((contactNames || []).filter(Boolean))];
+  return unique.length > 0
+    ? `🚫 Disqualified - ${reason} - ${count} - ${unique.join(', ')}`
+    : `🚫 Disqualified - ${reason} - ${count}`;
+}
+
+module.exports = { displayLabel, dqReasonLabel, formatDqLine };

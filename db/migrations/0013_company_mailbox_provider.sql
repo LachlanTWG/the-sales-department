@@ -1,9 +1,12 @@
 -- 0013: Default mailbox provider per client.
--- Bolton & Phased → Outlook; everyone else → Gmail (default).
--- UI uses this to pre-select provider when connecting; OAuth still allows switch.
+-- Source of truth for Gmail clients: Google Cloud OAuth test users (domains).
+-- Gmail: HDK, LRS, Hughes, East Coast Electrical, Nexgen, Enervia.
+-- Outlook: everyone else (Bolton, Phased, Sunbridge, …).
+-- Gmail mailboxes must be added as Google Cloud OAuth test users.
+-- UI pre-selects provider; OAuth still allows override.
 
 alter table companies
-  add column if not exists mailbox_provider text not null default 'gmail';
+  add column if not exists mailbox_provider text not null default 'outlook';
 
 do $$
 begin
@@ -16,15 +19,14 @@ begin
   end if;
 end $$;
 
--- Known Outlook clients
-update companies
-   set mailbox_provider = 'outlook'
- where slug in ('bolton-ec', 'phased-power-solutions')
-    or lower(name) in ('bolton ec', 'phased power solutions');
+-- Default all active clients to Outlook, then mark known Gmail domains.
+update companies set mailbox_provider = 'outlook' where active = true;
 
--- Everything else stays gmail (explicit for clarity)
 update companies
    set mailbox_provider = 'gmail'
- where mailbox_provider is distinct from 'outlook'
-   and slug not in ('bolton-ec', 'phased-power-solutions')
-   and lower(name) not in ('bolton ec', 'phased power solutions');
+ where slug in (
+   'hdk-long-run-roofing',
+   'lrs-electrical-solar',
+   'hughes-electrical',
+   'east-coast-electrical'
+ );

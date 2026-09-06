@@ -63,6 +63,7 @@ function buildDbParams(data, ctx) {
     adSource: data.adSource || null,
     quoteJobValue: data.quoteJobValue || null,
     appointmentAt: data.appointmentDateTime || null,
+    visitKind: data.visitKind === 'virtual' ? 'virtual' : (eventType === 'site_visit_booked' ? 'in_person' : null),
     source: ctx.source || 'manual',
     sourceRowId: ctx.sourceRowId || null,
     rawPayload,

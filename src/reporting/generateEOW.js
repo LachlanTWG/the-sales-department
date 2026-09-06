@@ -2,7 +2,7 @@ const { getOutcomeNames } = require('../sheets/createCompanySheet');
 const { loadConfig } = require('../config/configLoader');
 const { countOutcomes, formatVisitDateTime } = require('./generateEOD');
 const { cleanAddress } = require('./addressFormat');
-const { displayLabel } = require('./displayLabels');
+const { displayLabel, formatDqLine } = require('./displayLabels');
 
 function formatFullDate(dateStr) {
   const d = new Date(dateStr + 'T12:00:00+10:00');
@@ -23,7 +23,7 @@ function formatEOWLine(outcomeName, formulaTypeId, weeklyCounts, weeklyData) {
     case 11: {
       const count = weeklyCounts[outcomeName] || 0;
       if (count === 0) return null;
-      return `${outcomeName}: ${count}`;
+      return `${displayLabel(outcomeName)} - ${count}`;
     }
 
     case 12: {
@@ -51,13 +51,14 @@ function formatEOWLine(outcomeName, formulaTypeId, weeklyCounts, weeklyData) {
       if (weeklyData.siteVisits && weeklyData.siteVisits.length > 0) {
         const lines = weeklyData.siteVisits.map(sv => {
           const dt = formatVisitDateTime(sv.datetime);
-          return `${sv.contactName} - ${cleanAddress(sv.address) || 'TBC'} - ${dt || 'TBC'}`;
+          const virtual = sv.virtual ? ' (virtual)' : '';
+          return `${sv.contactName} - ${cleanAddress(sv.address) || 'TBC'} - ${dt || 'TBC'}${virtual}`;
         });
         return lines.join('\n');
       }
       const svCount = weeklyCounts[outcomeName] || 0;
       if (svCount === 0) return null;
-      return `${outcomeName}: ${svCount}`;
+      return `${displayLabel(outcomeName)} - ${svCount}`;
     }
 
     case 9: {
@@ -73,7 +74,7 @@ function formatEOWLine(outcomeName, formulaTypeId, weeklyCounts, weeklyData) {
       }
       const jobCount = weeklyCounts[outcomeName] || 0;
       if (jobCount === 0) return null;
-      return `${outcomeName}: ${jobCount}`;
+      return `${displayLabel(outcomeName)} - ${jobCount}`;
     }
 
     case 10: {
@@ -86,13 +87,13 @@ function formatEOWLine(outcomeName, formulaTypeId, weeklyCounts, weeklyData) {
     case 3: {
       const count = weeklyCounts[outcomeName] || 0;
       if (count === 0) return null;
-      return `${outcomeName}: ${count}`;
+      return `${displayLabel(outcomeName)} - ${count}`;
     }
 
     case 4: {
       const count = weeklyCounts[outcomeName] || 0;
       if (count === 0) return null;
-      return `${outcomeName}: ${count}`;
+      return `${displayLabel(outcomeName)} - ${count}`;
     }
 
     default:
@@ -155,6 +156,23 @@ async function generateEOW(spreadsheetId, salesPerson, startDate, endDate, compa
     const blockName = block.name.replace('{owner}', ownerName);
     const blockLines = [];
 
+    const isDq = (block.outcomes || []).some(o => String(o).startsWith('DQ - '))
+      || /disqualified/i.test(blockName);
+
+    if (isDq) {
+      for (const outcomeTpl of block.outcomes || []) {
+        const outcomeName = outcomeTpl.replace('{owner}', ownerName);
+        const count = weeklyCounts[outcomeName] || 0;
+        if (count === 0) continue;
+        blockLines.push(formatDqLine(outcomeName, count));
+      }
+      if (blockLines.length > 0) {
+        lines.push(...blockLines);
+        lines.push('');
+      }
+      continue;
+    }
+
     if (block.outcomes) {
       for (let outcomeTpl of block.outcomes) {
         const outcomeName = outcomeTpl.replace('{owner}', ownerName);
@@ -166,8 +184,27 @@ async function generateEOW(spreadsheetId, salesPerson, startDate, endDate, compa
     }
 
     if (blockLines.length > 0) {
-      lines.push(blockName);
+      const vCount = (weeklyData.siteVisits || []).filter(s => s.virtual).length;
+      const heading = (block.outcomes || []).includes('Site Visit Booked') && vCount > 0
+        ? `${blockName} — ${weeklyData.siteVisits.length} (${vCount} virtual)`
+        : blockName;
+      lines.push(heading);
       lines.push(...blockLines);
+      lines.push('');
+    }
+  }
+
+  if (salesPerson && salesPerson !== 'Team') {
+    const bsvNames = [...new Set((data.names['Book Site Visit'] || []).filter(Boolean))];
+    if (bsvNames.length > 0) {
+      const open = data.visitsOpen || [];
+      lines.push('✅ Site visit coverage');
+      if (open.length === 0) {
+        lines.push('Complete 100%');
+      } else {
+        lines.push(`Still in need of log: ${open.length} of ${bsvNames.length}`);
+        for (const name of open) lines.push(`- ${name}`);
+      }
       lines.push('');
     }
   }

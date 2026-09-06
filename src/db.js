@@ -84,7 +84,7 @@ const DB_TO_EVENT_TYPE = {
 const ACTIVITY_GRID_HEADERS = [
   'Date', 'Sales Person', 'Contact Name', 'Event Type', 'Outcome',
   'Ad Source', 'Quote/Job Value', 'Contact Address', 'Contact ID',
-  'Appointment Date Time', 'Appointment Date',
+  'Appointment Date Time', 'Appointment Date', 'Visit Kind',
 ];
 
 // ─── Read-layer dedup ───────────────────────────────────────────────
@@ -164,7 +164,8 @@ async function fetchActivityGrid(companyName) {
          coalesce(contact_address, '') as contact_address,
          coalesce(contact_id, '') as contact_id,
          coalesce(to_char(appointment_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS'), '') as appointment_date_time,
-         coalesce(to_char(appointment_at at time zone 'UTC', 'YYYY-MM-DD'), '') as appointment_date
+         coalesce(to_char(appointment_at at time zone 'UTC', 'YYYY-MM-DD'), '') as appointment_date,
+         coalesce(visit_kind, '') as visit_kind
        from activities
        where company_id = $1
        order by occurred_on, created_at`,
@@ -194,6 +195,7 @@ async function fetchActivityGrid(companyName) {
         r.contact_id,
         r.appointment_date_time,
         r.appointment_date,
+        r.visit_kind || '',
       ]);
     }
     if (dropped > 0) {
@@ -232,6 +234,7 @@ function oneLine(value) {
  * @param {string} [params.adSource]
  * @param {string} [params.quoteJobValue]
  * @param {string} [params.appointmentAt]   ISO timestamp
+ * @param {string} [params.visitKind]       in_person | virtual (site visits)
  * @param {string} params.source            ghl | make | quotie | cli | sheets_backfill | manual
  * @param {string} [params.sourceRowId]     For idempotency on backfill / replay
  * @param {object} [params.rawPayload]      Original webhook body
@@ -246,6 +249,9 @@ async function insertActivity(params) {
     }
     const salesPersonId = await resolveSalesPersonId(client, companyId, params.salesPersonName);
 
+    const visitKind = params.eventType === 'site_visit_booked'
+      ? (params.visitKind === 'virtual' ? 'virtual' : 'in_person')
+      : null;
     const sql = `
       insert into activities (
         company_id, sales_person_id, sales_person_name,
@@ -253,14 +259,14 @@ async function insertActivity(params) {
         event_type,
         contact_name, contact_id, contact_address,
         outcome, ad_source, quote_job_value, appointment_at,
-        source, source_row_id, raw_payload
+        source, source_row_id, raw_payload, visit_kind
       ) values (
         $1, $2, $3,
         $4, $5,
         $6,
         $7, $8, $9,
         $10, $11, $12, $13,
-        $14, $15, $16
+        $14, $15, $16, $17
       )
       on conflict (company_id, source, source_row_id) do nothing
       returning id
@@ -282,6 +288,7 @@ async function insertActivity(params) {
       params.source,
       params.sourceRowId || null,
       params.rawPayload ? JSON.stringify(params.rawPayload) : null,
+      visitKind,
     ];
     const { rows } = await client.query(sql, values);
     return { id: rows[0]?.id || null, deduped: rows.length === 0 };
@@ -386,6 +393,7 @@ async function upsertPendingSiteVisit(params) {
     const roughJobValue = params.roughJobValue != null ? String(params.roughJobValue) : null;
     const source = params.source || 'ghl';
     const rawPayload = params.rawPayload ? JSON.stringify(params.rawPayload) : null;
+    const visitKind = params.visitKind === 'virtual' ? 'virtual' : 'in_person';
 
     const existing = await client.query(
       `select id from pending_site_visits
@@ -410,12 +418,13 @@ async function upsertPendingSiteVisit(params) {
            appointment_display = coalesce(nullif($8, ''), appointment_display),
            booked_on = coalesce($9::date, booked_on),
            rough_job_value = coalesce(nullif($10, ''), rough_job_value),
-           raw_payload = coalesce($11::jsonb, raw_payload)
+           raw_payload = coalesce($11::jsonb, raw_payload),
+           visit_kind = coalesce($12, visit_kind)
          where id = $1`,
         [
           id, contactName, contactAddress, contactPhone, contactEmail,
           salesPersonName, appointmentAt, appointmentDisplay, bookedOn,
-          roughJobValue, rawPayload,
+          roughJobValue, rawPayload, visitKind,
         ]
       );
       return { id, deduped: true };
@@ -427,15 +436,15 @@ async function upsertPendingSiteVisit(params) {
          contact_phone, contact_email,
          sales_person_name, appointment_raw, appointment_at, appointment_display,
          booked_on, rough_job_value,
-         source, raw_payload
-       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         source, raw_payload, visit_kind
+       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        returning id`,
       [
         companyId, contactId, contactName, contactAddress,
         contactPhone, contactEmail,
         salesPersonName, appointmentRaw, appointmentAt, appointmentDisplay,
         bookedOn, roughJobValue,
-        source, rawPayload,
+        source, rawPayload, visitKind,
       ]
     );
     return { id: rows[0]?.id || null, deduped: false };

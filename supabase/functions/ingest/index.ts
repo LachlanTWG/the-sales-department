@@ -30,7 +30,7 @@ import {
   decodeBodyText,
   buildGHLEodActivity,
   buildGHLJobWonActivity,
-  buildGHLSiteVisitActivity,
+  buildPendingSiteVisit,
   buildQuoteActivity,
   buildEmailActivity,
   buildManualActivity,
@@ -328,8 +328,65 @@ Deno.serve(async (req) => {
       const company = await resolveGHLCompany();
       if (company instanceof Response) return company;
       const roster = await getRoster(company.id);
-      const built = buildGHLSiteVisitActivity(body, company.timezone, roster);
-      return await finish(company, built, { status: "logged", type: "site-visit", company: company.name }, "GHL SITE VISIT");
+      const pending = buildPendingSiteVisit(body, company.timezone, roster);
+      if (dryrun) {
+        return json(200, { status: "dryrun", pending, type: pending.visitKind === "virtual" ? "virtual-site-visit" : "site-visit" });
+      }
+      const contactId = pending.contactId || "";
+      const appointmentRaw = pending.appointmentRaw || "";
+      const { data: existing } = await supabase
+        .from("pending_site_visits")
+        .select("id")
+        .eq("company_id", company.id)
+        .is("resolved_at", null)
+        .is("dismissed_at", null)
+        .eq("contact_id", contactId)
+        .eq("appointment_raw", appointmentRaw)
+        .maybeSingle();
+      const row = {
+        company_id: company.id,
+        contact_id: pending.contactId,
+        contact_name: pending.contactName,
+        contact_address: pending.contactAddress,
+        contact_phone: pending.contactPhone,
+        contact_email: pending.contactEmail,
+        sales_person_name: pending.salesPersonName,
+        appointment_raw: pending.appointmentRaw,
+        appointment_at: pending.appointmentAt,
+        appointment_display: pending.appointmentDisplay,
+        booked_on: pending.bookedOn,
+        source: pending.source,
+        raw_payload: pending.rawPayload,
+        visit_kind: pending.visitKind,
+      };
+      let pendingId: string | null = existing?.id ?? null;
+      let deduped = false;
+      if (existing?.id) {
+        const { error } = await supabase.from("pending_site_visits").update(row).eq("id", existing.id);
+        if (error) {
+          console.error(`[GHL SITE VISIT → pending] update ${company.name}: ${error.message}`);
+          return respond(200, { status: "error" }, `pending update failed: ${error.message.slice(0, 400)}`, body);
+        }
+        deduped = true;
+      } else {
+        const { data: inserted, error } = await supabase.from("pending_site_visits").insert(row).select("id").single();
+        if (error) {
+          console.error(`[GHL SITE VISIT → pending] insert ${company.name}: ${error.message}`);
+          return respond(200, { status: "error" }, `pending insert failed: ${error.message.slice(0, 400)}`, body);
+        }
+        pendingId = inserted?.id ?? null;
+      }
+      console.log(
+        `[GHL SITE VISIT → pending] ${company.name} / ${pending.salesPersonName} / ${pending.contactName || "?"} ` +
+        `(${pending.visitKind}${deduped ? " deduped" : ""}, id=${pendingId || "?"})`,
+      );
+      return respond(200, {
+        status: "pending",
+        type: pending.visitKind === "virtual" ? "virtual-site-visit" : "site-visit",
+        company: company.name,
+        salesPerson: pending.salesPersonName,
+        visitKind: pending.visitKind,
+      });
     }
 
     // ─── Make.com / Quotie routes ──────────────────────────────────────

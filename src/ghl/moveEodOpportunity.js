@@ -109,6 +109,8 @@ const WON_STAGES = [
   'Verbal Confirmation',
 ];
 
+// Popup EOD 3 is a single "Not Ready Yet - Pre-Quote"; hyphen-less "Pre Quote"
+// still matches via the notready* prefix. HDK's stage is "Not Ready for Site Visit".
 const NOT_READY_PRE = [
   'Not Ready Yet - Pre-Quote',
   'Not Ready Yet',

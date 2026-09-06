@@ -4,8 +4,9 @@ const GHL = 'https://services.leadconnectorhq.com';
 const H = (t) => ({ Authorization: `Bearer ${t}`, Version: '2021-07-28', 'Content-Type': 'application/json' });
 
 // Canonical ladder (Sunbridge/Hughes shape); {owner} substituted per client.
-const CANON = ['Inbound Lead', 'Day 1', 'Not a Good Time to Talk', 'Day 2', 'Day 3', 'Day 4', 'Day 5',
-  'Not Ready Yet - Pre-Quote', 'Requires Quoting', 'Quote Sent', 'Not Ready Yet - Post-Quote',
+const CANON = ['Inbound Lead', 'Day 1', 'Not a Good Time to Talk', 'Not Ready Yet - Pre-Quote',
+  'Day 2', 'Day 3', 'Day 4', 'Day 5',
+  'Requires Quoting', 'Quote Sent', 'Not Ready Yet - Post-Quote',
   'Site Visit Booked', 'Passed Onto {owner}', 'Verbal Confirmation', 'Accepted', 'Job Scheduled',
   'Job Completed', 'Lost', 'Abandoned', 'Disqualified'];
 

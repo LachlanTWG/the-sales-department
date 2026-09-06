@@ -512,6 +512,7 @@ async function sendSiteVisitNotification(company) {
       address: (b['Contact Address'] || '').replace(/,\s*$/, '').trim(),
       datetime: dtStr,
       salesPerson: (b['Sales Person'] || '').trim(),
+      virtual: String(b['Visit Kind'] || '').toLowerCase() === 'virtual',
     };
 
     if (visitDateOnly === today) {
@@ -529,10 +530,14 @@ async function sendSiteVisitNotification(company) {
   lines.push('');
 
   if (todayVisits.length > 0) {
-    lines.push(`*Today's Site Visits (${todayVisits.length}):*`);
+    const todayVirtual = todayVisits.filter(sv => sv.virtual).length;
+    const todayCount = todayVirtual > 0
+      ? `${todayVisits.length}, ${todayVirtual} virtual`
+      : String(todayVisits.length);
+    lines.push(`*Today's Site Visits (${todayCount}):*`);
     for (const sv of todayVisits) {
       const dt = formatVisitTime(sv.datetime);
-      lines.push(`- ${sv.contactName} - ${sv.address || 'TBC'} - ${dt || 'TBC'} (${sv.salesPerson})`);
+      lines.push(`- ${sv.contactName} - ${sv.address || 'TBC'} - ${dt || 'TBC'} (${sv.salesPerson})${sv.virtual ? ' (virtual)' : ''}`);
     }
   } else {
     lines.push('*Today\'s Site Visits:* No site visits booked for today');
@@ -545,7 +550,7 @@ async function sendSiteVisitNotification(company) {
     upcomingVisits.sort((a, b) => new Date(a.datetime) - new Date(b.datetime));
     for (const sv of upcomingVisits) {
       const dt = formatVisitDateTimeFull(sv.datetime);
-      lines.push(`- ${sv.contactName} - ${sv.address || 'TBC'} - ${dt || 'TBC'} (${sv.salesPerson})`);
+      lines.push(`- ${sv.contactName} - ${sv.address || 'TBC'} - ${dt || 'TBC'} (${sv.salesPerson})${sv.virtual ? ' (virtual)' : ''}`);
     }
   } else {
     lines.push('*Upcoming Site Visits (Next 7 Days):* Nothing booked for the week ahead');

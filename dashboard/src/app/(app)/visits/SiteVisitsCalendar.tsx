@@ -32,6 +32,7 @@ export type CalendarVisit = {
   localCity: string | null;       // e.g. "Perth"
   scheduled: boolean;
   sortMs: number;
+  virtual?: boolean;
 };
 
 const DAYS_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -150,13 +151,16 @@ export function SiteVisitsCalendar({
                         <span
                           key={v.id}
                           className={`truncate rounded px-1 py-0.5 text-[11px] leading-tight ${
-                            v.scheduled
-                              ? "bg-sky-950/50 text-sky-200/90"
-                              : "bg-amber-950/40 text-amber-200/90"
+                            v.virtual
+                              ? "bg-violet-950/50 text-violet-200/90"
+                              : v.scheduled
+                                ? "bg-sky-950/50 text-sky-200/90"
+                                : "bg-amber-950/40 text-amber-200/90"
                           }`}
-                          title={`${v.timeLabel} Sydney${v.localTimeLabel ? ` · ${v.localTimeLabel} ${v.localCity}` : ""} · ${v.contactName}${v.execName ? ` · ${v.execName}` : ""}`}
+                          title={`${v.timeLabel} Sydney${v.localTimeLabel ? ` · ${v.localTimeLabel} ${v.localCity}` : ""} · ${v.contactName}${v.execName ? ` · ${v.execName}` : ""}${v.virtual ? " · Virtual" : ""}`}
                         >
                           <span className="tabular-nums opacity-70">{v.timeLabel}</span> {v.contactName}
+                          {v.virtual ? <span className="ml-0.5 text-[10px] opacity-70">V</span> : null}
                         </span>
                       ))}
                       {dayVisits.length > maxChips && (
@@ -230,6 +234,9 @@ function DayDrawer({ day, visits, onClose, onEdit }: { day: string; visits: Cale
             <h2 className="text-base font-semibold text-zinc-100">{longHeading(day)}</h2>
             <p className="mt-0.5 text-xs text-zinc-500">
               {visits.length} site visit{visits.length === 1 ? "" : "s"}
+              {visits.filter(x => x.virtual).length > 0 && (
+                <span className="text-violet-400/80"> · {visits.filter(x => x.virtual).length} virtual</span>
+              )}
               {tbc > 0 && <span className="text-amber-400/80"> · {tbc} time TBC</span>}
             </p>
           </div>
@@ -274,6 +281,11 @@ function VisitCard({ v, onEdit }: { v: CalendarVisit; onEdit: (v: CalendarVisit)
             {v.timeLabel}
             {v.localTimeLabel && <span className="ml-1 font-normal text-sky-300/60">Sydney</span>}
           </span>
+          {v.virtual && (
+            <span className="rounded bg-violet-950/60 px-1.5 py-0.5 text-xs font-medium text-violet-200">
+              Virtual
+            </span>
+          )}
           {v.localTimeLabel && (
             <span className="rounded bg-emerald-950/50 px-1.5 py-0.5 text-xs font-medium tabular-nums text-emerald-200">
               {v.localTimeLabel} <span className="font-normal text-emerald-300/60">{v.localCity}</span>

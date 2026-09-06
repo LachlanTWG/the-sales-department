@@ -11,6 +11,7 @@ const {
   loadCompanies,
 } = require('./runReports');
 const { logActivity, logActivities } = require('./sheets/logActivity');
+const { visitKindFromPayload, isVirtualVisitKind } = require('./ghl/visitKind');
 const { appendRows } = require('./sheets/writeSheet');
 const { populateAllFormulas } = require('./sheets/populateFormulas');
 const {
@@ -116,8 +117,11 @@ function formatAuNzDateForSlack(raw) {
 
 /** Slack message for a popup-completed site visit booking summary. */
 function formatSiteVisitSummary(b) {
+  const virtual = isVirtualVisitKind(b.visitKind) || b.virtual === true;
   const lines = [
-    `*Site Visit Booked* — ${b.companyName || 'Client'}`,
+    virtual
+      ? `*Virtual Site Visit Booked* — ${b.companyName || 'Client'}`
+      : `*Site Visit Booked* — ${b.companyName || 'Client'}`,
     `*Exec:* ${b.salesPerson || '—'}`,
     `*Lead:* ${b.contactName || '—'}`,
     `*Phone:* ${b.contactPhone || '—'}`,
@@ -517,10 +521,11 @@ const server = http.createServer(async (req, res) => {
     const state = url.searchParams.get('state');
     const dashBase = (process.env.DASHBOARD_URL || 'https://eod-creator.vercel.app').replace(/\/+$/, '');
     try {
-      if (!code || !state) throw new Error('Missing code or state');
-      // Microsoft can return error= on the query string
-      const oauthErr = url.searchParams.get('error_description') || url.searchParams.get('error');
+      // Providers (Google/Microsoft) send error= without a code when the user
+      // is blocked or cancels. Read that first or we mis-report "missing code".
+      const oauthErr = mailbox.describeOAuthError(url.searchParams);
       if (oauthErr) throw new Error(oauthErr);
+      if (!code || !state) throw new Error('Missing code or state');
       const result = await mailbox.handleOAuthCallback(code, state);
       const dest = new URL(result.returnUrl || `${dashBase}/settings/email`);
       dest.searchParams.set('connected', '1');
@@ -810,6 +815,7 @@ const server = http.createServer(async (req, res) => {
   // Normalize GHL outcome values to canonical names used in reporting
   const OUTCOME_ALIASES = {
     'Not Ready to Proceed w. Job': 'Not Ready Yet - Post Quote',
+    'Not Ready Yet - Pre Quote': 'Not Ready Yet - Pre-Quote',
     'Not Ready for Site Visit': 'Not Ready Yet - Pre-Quote',
     'Rescheduled Site Visit': 'Not Ready Yet - Pre-Quote',
     'Rough Figures Sent': 'Requires Quoting',
@@ -1026,12 +1032,14 @@ const server = http.createServer(async (req, res) => {
       cal.date_created ||
       '';
     const bookedOn = toIsoDateOnly(bookedRaw) || companyToday(company);
+    const visitKind = visitKindFromPayload(body);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'pending',
-      type: 'site-visit',
+      type: visitKind === 'virtual' ? 'virtual-site-visit' : 'site-visit',
       company: company.name,
       salesPerson: salesPersonName,
+      visitKind,
     }));
 
     captureGhlContactEmail(company, body, deepFindField);
@@ -1051,10 +1059,11 @@ const server = http.createServer(async (req, res) => {
       roughJobValue: null,
       source: 'ghl',
       rawPayload: body,
+      visitKind,
     }).then((r) => {
       console.log(
         `[GHL SITE VISIT → pending] ${company.name} / ${salesPersonName} / ${contactName || '?'} ` +
-        `(id=${r.id || '?'}${r.deduped ? ' deduped' : ''})`
+        `(${visitKind}${r.deduped ? ' deduped' : ''}, id=${r.id || '?'})`
       );
     }).catch(e => console.error(`[GHL SITE VISIT → pending] Error ${company.name}:`, e.message));
     return;

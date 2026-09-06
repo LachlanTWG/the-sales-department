@@ -1,7 +1,7 @@
 const { getOutcomeNames } = require('../sheets/createCompanySheet');
 const { loadConfig } = require('../config/configLoader');
 const { countOutcomes } = require('./generateEOD');
-const { displayLabel } = require('./displayLabels');
+const { displayLabel, formatDqLine } = require('./displayLabels');
 
 const QUARTER_MONTHS = {
   1: [1, 2, 3],
@@ -123,7 +123,10 @@ async function generateEOQ(spreadsheetId, salesPerson, year, quarter, companyNam
     lines.push(`Total Contacts Quoted: ${quarterlyCounts['Quote Sent'] || 0}`);
     lines.push(`Total Individual Quotes: ${quarterlyCounts['Total Individual Quotes'] || 0}`);
     lines.push(`Pipeline Value: ${formatDollar(quarterlyCounts['Pipeline Value'] || 0)}`);
-    if (has('Site Visit Booked')) lines.push(`Site Visits: ${quarterlyCounts['Site Visit Booked'] || 0}`);
+    if (has('Site Visit Booked')) {
+      const sv = quarterlyCounts['Site Visits Booked'] || quarterlyCounts['Site Visit Booked'] || 0;
+      lines.push(`Site Visits Booked - ${sv}`);
+    }
     if (has('Job Won')) {
       const jobCount = jobDetails.length > 0 ? jobDetails.length : (quarterlyCounts['Job Won'] || 0);
       lines.push(`Jobs Won: ${jobCount}`);
@@ -168,7 +171,10 @@ async function generateEOQ(spreadsheetId, salesPerson, year, quarter, companyNam
     lines.push('🔴 Attrition');
     if (totalLost > 0) lines.push(`Lost: ${totalLost}`);
     if (totalAbandoned > 0) lines.push(`Abandoned: ${totalAbandoned}`);
-    if (totalDQ > 0) lines.push(`Disqualified: ${totalDQ}`);
+    for (const o of dqOutcomes) {
+      const n = quarterlyCounts[o.name] || 0;
+      if (n > 0) lines.push(formatDqLine(o.name, n));
+    }
   }
 
   const message = lines.join('\n');

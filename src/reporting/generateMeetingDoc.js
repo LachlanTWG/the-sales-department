@@ -396,7 +396,7 @@ async function generateMeetingDoc(startDate, endDate) {
     lines.push('|---|---|---|---|---|');
     for (const v of upcoming) {
       const addr = (v.address || '-').replace(/[\n\r]+/g, ', ');
-      lines.push(`| ${v.datetime || v.date} | ${v.exec} | ${v.company} | ${v.contact} | ${addr} |`);
+      lines.push(`| ${v.datetime || v.date} | ${v.exec} | ${v.company} | ${v.contact}${v.virtual ? ' (virtual)' : ''} | ${addr} |`);
     }
   } else {
     lines.push('_None booked._');

@@ -12,6 +12,7 @@ import { todayInTz, SYDNEY_TZ } from "./format";
 import { mondayOf, addDaysIso, type Period } from "./dates";
 import { listCompanies, type CompanyRow } from "./queries";
 import { normName, normValue } from "./duplicates";
+import { isVirtualVisitKind, siteVisitsHeader, virtualTag } from "./visitKind";
 
 // Report render format, decoupled from any fixed calendar period:
 //   "summary"  → the MONTHLY/PERFORMANCE-style aggregate (📞 Calls, 💰 Revenue
@@ -39,6 +40,7 @@ type ActivityRow = {
   ad_source: string | null;
   quote_job_value: string | null;
   appointment_at: string | null;
+  visit_kind?: string | null;
 };
 
 type Block = { name: string; outcomes?: string[] };
@@ -66,11 +68,13 @@ type CountedData = {
   counts: Record<string, number>;
   names: Record<string, string[]>;
   quoteDetails: QuoteDetail[];
-  siteVisits: { contactName: string; address: string; datetime: string }[];
+  siteVisits: { contactName: string; address: string; datetime: string; virtual?: boolean }[];
   jobDetails: { contactName: string; address: string; value: number; source: string }[];
   customNotes: { contactName: string; note: string }[]; // EOD 4 custom outcomes, surfaced verbatim
   /** Requires Quoting contacts still missing a team quote in-range. */
   quotingOpen: string[];
+  /** Book Site Visit contacts still missing a logged site_visit_booked in-range. */
+  visitsOpen: string[];
 };
 
 type CountOpts = {
@@ -105,6 +109,7 @@ function normalizeName(name: string | null) {
 
 const OUTCOME_ALIASES: Record<string, string> = {
   "Not Ready to Proceed w. Job": "Not Ready Yet - Post Quote",
+  "Not Ready Yet - Pre Quote": "Not Ready Yet - Pre-Quote",
   "Not Ready for Site Visit": "Not Ready Yet - Pre-Quote",
   "Rescheduled Site Visit": "Not Ready Yet - Pre-Quote",
   "Rough Figures Sent": "Requires Quoting",
@@ -267,6 +272,7 @@ function countOutcomes(
   const jobDetails: CountedData["jobDetails"] = [];
   const customNotes: CountedData["customNotes"] = [];
   const myRq: { name: string; key: string | null; companyId: string }[] = [];
+  const myBookSv: { name: string; key: string | null; companyId: string }[] = [];
 
   const rangeStart = opts.rangeStart;
   const rangeEnd = opts.rangeEnd;
@@ -320,7 +326,8 @@ function countOutcomes(
         sv.contactName === contactName && sv.address === address && sv.datetime === datetime,
       );
       if (isDuplicate) continue;
-      siteVisits.push({ contactName, address, datetime });
+      const virtual = isVirtualVisitKind(a.visit_kind) || /virtual/i.test(a.outcome || "");
+      siteVisits.push({ contactName, address, datetime, virtual });
       if ("Site Visit Booked" in counts) {
         counts["Site Visit Booked"]++;
         names["Site Visit Booked"].push(contactName);
@@ -376,6 +383,13 @@ function countOutcomes(
         }
         if (actionKey === "Requires Quoting") {
           myRq.push({
+            name: contactName,
+            key: contactKey(a.company_id, a.contact_id, a.contact_name),
+            companyId: a.company_id,
+          });
+        }
+        if (actionKey === "Book Site Visit") {
+          myBookSv.push({
             name: contactName,
             key: contactKey(a.company_id, a.contact_id, a.contact_name),
             companyId: a.company_id,
@@ -455,14 +469,30 @@ function countOutcomes(
     [...openByName.entries()].filter(([, open]) => open).map(([n]) => n),
   );
 
-  // Synthetic display count for the Pipeline Progress block. Set directly (not
-  // registered in outcomes.json) so it stays a pure display value — the backend
-  // does the same to avoid it becoming a positional sheet-storage column.
-  // "Site Visit Booked" (singular, formula 8) still renders the detailed list in
-  // the 🏠 Site Visits block.
+  const teamVisited = new Set<string>();
+  for (const a of allActivities) {
+    if (a.event_type !== "site_visit_booked" || !inRange(a.occurred_on)) continue;
+    const key = contactKey(a.company_id, a.contact_id, a.contact_name);
+    if (key) teamVisited.add(key);
+    const n = normalizeName(a.contact_name);
+    if (n) teamVisited.add(`${a.company_id}|name:${n}`);
+  }
+  const visitOpenByName = new Map<string, boolean>();
+  for (const b of myBookSv) {
+    if (!b.name) continue;
+    const closed = (b.key && teamVisited.has(b.key))
+      || teamVisited.has(`${b.companyId}|name:${normalizeName(b.name)}`);
+    if (!visitOpenByName.has(b.name) || closed) visitOpenByName.set(b.name, !closed);
+  }
+  const visitsOpen = sortNamesAlpha(
+    [...visitOpenByName.entries()].filter(([, open]) => open).map(([n]) => n),
+  );
+
+  // Synthetic display count for the 🏠 Site Visits block header. Set directly
+  // (not registered in outcomes.json) so it stays a pure display value.
   counts["Site Visits Booked"] = siteVisits.length;
 
-  return { counts, names, quoteDetails, siteVisits, jobDetails, customNotes, quotingOpen };
+  return { counts, names, quoteDetails, siteVisits, jobDetails, customNotes, quotingOpen, visitsOpen };
 }
 
 // ─── Formatting ──────────────────────────────────────────────────────
@@ -509,7 +539,56 @@ const DISPLAY_LABELS: Record<string, string> = {
   "Facebook Ad Form": "FB Ad Form",
   "Direct Lead passed on from Client": "Direct Lead from Client",
 };
-const displayLabel = (name: string): string => DISPLAY_LABELS[name] || name;
+
+/** Strip the redundant "DQ - " prefix; "Disqualified" is already in the label. */
+function dqReasonLabel(name: string): string {
+  return name.replace(/^DQ\s*-\s*/, "");
+}
+
+const displayLabel = (name: string): string => {
+  if (DISPLAY_LABELS[name]) return DISPLAY_LABELS[name];
+  if (name.startsWith("DQ - ")) return dqReasonLabel(name);
+  return name;
+};
+
+function formatDqLine(outcomeName: string, count: number, contactNames?: string[]): string {
+  const reason = dqReasonLabel(outcomeName);
+  const unique = [...new Set((contactNames || []).filter(Boolean))];
+  return unique.length > 0
+    ? `🚫 Disqualified - ${reason} - ${count} - ${unique.join(", ")}`
+    : `🚫 Disqualified - ${reason} - ${count}`;
+}
+
+function formatDqLinesFromOutcomes(data: CountedData, includeNames = false): string[] {
+  const lines: string[] = [];
+  for (const o of OUTCOMES.outcomes.filter(x => x.category === "dq")) {
+    const n = data.counts[o.name] || 0;
+    if (n <= 0) continue;
+    lines.push(formatDqLine(o.name, n, includeNames ? data.names[o.name] : undefined));
+  }
+  return lines;
+}
+
+function isDqBlock(block: Block): boolean {
+  return (block.outcomes || []).some(o => o.startsWith("DQ - "))
+    || /disqualified/i.test(block.name);
+}
+
+function dqLinesForBlock(
+  block: Block,
+  ownerName: string,
+  data: CountedData,
+  includeNames: boolean,
+): string[] {
+  const lines: string[] = [];
+  for (const tpl of block.outcomes || []) {
+    const outcomeName = tpl.replace("{owner}", ownerName);
+    const n = data.counts[outcomeName] || 0;
+    if (n <= 0) continue;
+    lines.push(formatDqLine(outcomeName, n, includeNames ? data.names[outcomeName] : undefined));
+  }
+  return lines;
+}
 
 /**
  * Short site-visit timestamp for Team EOD: "13 Aug 3:00pm" (no weekday, no address).
@@ -528,8 +607,8 @@ function formatTeamVisitShort(iso: string | null): string {
 }
 
 /**
- * Dashboard-only Team EOD (day) layout — matches the agreed mock.
- * Personal / week / month / quarter / year are unchanged.
+ * Compact Team layout (day + week) — matches the agreed mock.
+ * DQ reasons drop the redundant "DQ - " prefix; count lines use " - ".
  */
 function buildTeamEODMessage(opts: {
   companyLabel: string;
@@ -537,13 +616,15 @@ function buildTeamEODMessage(opts: {
   ownerName: string;
   rangeEnd: string;
   data: CountedData;
+  period?: Period;
+  rangeStart?: string;
 }): string {
   const { companyLabel, personLabel, ownerName, rangeEnd, data } = opts;
   const { counts, quoteDetails, siteVisits, jobDetails } = data;
-  const lines: string[] = [
-    `EOD Report - ${formatEODDate(rangeEnd)} - ${personLabel} - ${companyLabel}`,
-    "",
-  ];
+  const period = opts.period ?? "day";
+  const lines: string[] = period === "day" || !opts.rangeStart
+    ? [`EOD Report - ${formatEODDate(rangeEnd)} - ${personLabel} - ${companyLabel}`, ""]
+    : buildHeader(period, companyLabel, personLabel, opts.rangeStart, rangeEnd);
   const blank = () => { lines.push(""); };
 
   const countLine = (label: string, n: number, sep = " - "): string | null =>
@@ -593,9 +674,7 @@ function buildTeamEODMessage(opts: {
     for (const name of pipelineOutcomes) {
       const n = counts[name] || 0;
       if (n <= 0) continue;
-      // Site Visits Booked keeps ":" like the mock; others use " - "
-      if (name === "Site Visits Booked") block.push(`Site Visits Booked: ${n}`);
-      else block.push(`${name} - ${n}`);
+      block.push(`${name} - ${n}`);
     }
     if (block.length > 0) {
       lines.push("🛠️ Pipeline Progress");
@@ -651,9 +730,9 @@ function buildTeamEODMessage(opts: {
   // ── 🏠 Site Visits — name + short time only ──────────────────────
   {
     if (siteVisits.length > 0) {
-      lines.push("🏠 Site Visits");
+      lines.push(siteVisitsHeader("🏠 Site Visits", siteVisits));
       for (const sv of siteVisits) {
-        lines.push(`- ${sv.contactName || "TBC"} - ${formatTeamVisitShort(sv.datetime)}`);
+        lines.push(`- ${sv.contactName || "TBC"} - ${formatTeamVisitShort(sv.datetime)}${virtualTag(sv.virtual)}`);
       }
       blank();
     }
@@ -670,7 +749,7 @@ function buildTeamEODMessage(opts: {
 
   // ── 💔 / 👻 / 🚫 flat per-reason lines (no section headers) ──────
   // Mock: "💔 Lost - Price - 1" / "👻 Abandoned - Not Responding - 2"
-  //       / "🚫 Disqualified - DQ - Price - 1"
+  //       / "🚫 Disqualified - Price - 1"
   {
     const before = lines.length;
     for (const o of OUTCOMES.outcomes.filter(x => x.category === "lost")) {
@@ -683,7 +762,7 @@ function buildTeamEODMessage(opts: {
     }
     for (const o of OUTCOMES.outcomes.filter(x => x.category === "dq")) {
       const n = counts[o.name] || 0;
-      if (n > 0) lines.push(`🚫 Disqualified - ${o.name} - ${n}`);
+      if (n > 0) lines.push(formatDqLine(o.name, n));
     }
     if (lines.length > before) blank();
   }
@@ -755,10 +834,10 @@ function formatEODLine(outcomeName: string, formulaId: number, data: CountedData
       // Team day uses buildTeamEODMessage (short time). Other Team surfaces keep name + time.
       if (isTeam) {
         return siteVisits.map(sv =>
-          `${sv.contactName} - ${formatTeamVisitShort(sv.datetime)}`).join("\n");
+          `${sv.contactName} - ${formatTeamVisitShort(sv.datetime)}${virtualTag(sv.virtual)}`).join("\n");
       }
       return siteVisits.map(sv =>
-        `${sv.contactName} - ${cleanAddress(sv.address) || "TBC"} - ${formatVisitDateTime(sv.datetime) || "TBC"}`).join("\n");
+        `${sv.contactName} - ${cleanAddress(sv.address) || "TBC"} - ${formatVisitDateTime(sv.datetime) || "TBC"}${virtualTag(sv.virtual)}`).join("\n");
     }
     case 9: {                                                     // Job Details — always full lines (Team + personal)
       if (jobDetails.length === 0) return null;
@@ -802,10 +881,10 @@ function formatEOWLine(
       if (c === 0) return null;
       if (!isTeam && EOW_NAMED_OUTCOMES.has(outcomeName)) {
         const unique = sortNamesAlpha([...new Set((names[outcomeName] || []).filter(Boolean))]);
-        if (unique.length === 0) return `${label}: ${c}`;
-        return `${label}: ${c}\n${unique.map(n => `- ${n}`).join("\n")}`;
+        if (unique.length === 0) return `${label} - ${c}`;
+        return `${label} - ${c}\n${unique.map(n => `- ${n}`).join("\n")}`;
       }
-      return `${label}: ${c}`;
+      return `${label} - ${c}`;
     }
     case 12: {
       const total = counts["Total Calls"] || counts["Total Contact Attempts"] || 0;
@@ -833,10 +912,10 @@ function formatEOWLine(
     case 8: {
       if (siteVisits.length > 0) {
         return siteVisits.map(sv =>
-          `${sv.contactName} - ${cleanAddress(sv.address) || "TBC"} - ${formatVisitDateTime(sv.datetime) || "TBC"}`).join("\n");
+          `${sv.contactName} - ${cleanAddress(sv.address) || "TBC"} - ${formatVisitDateTime(sv.datetime) || "TBC"}${virtualTag(sv.virtual)}`).join("\n");
       }
       const c = counts[outcomeName] || 0;
-      return c === 0 ? null : `${label}: ${c}`;
+      return c === 0 ? null : `${label} - ${c}`;
     }
     case 9: {
       if (jobDetails.length > 0) {
@@ -846,10 +925,10 @@ function formatEOWLine(
         return lines.join("\n");
       }
       const c = counts[outcomeName] || 0;
-      return c === 0 ? null : `${label}: ${c}`;
+      return c === 0 ? null : `${label} - ${c}`;
     }
     case 10: { const c = counts["Total Individual Quotes"] || 0; return c === 0 ? null : `Total Individual Quotes: ${c}`; }
-    case 2: case 3: case 4: { const c = counts[outcomeName] || 0; return c === 0 ? null : `${label}: ${c}`; }
+    case 2: case 3: case 4: { const c = counts[outcomeName] || 0; return c === 0 ? null : `${label} - ${c}`; }
     default: return null;
   }
 }
@@ -862,6 +941,42 @@ function uniqueRequiresQuoting(data: CountedData): string[] {
 /** Unique Requires Quoting contacts this period with no matching Quote Sent (A–Z). */
 function requiresQuotingStillOpen(data: CountedData): string[] {
   return data.quotingOpen || [];
+}
+
+function uniqueBookSiteVisit(data: CountedData): string[] {
+  return sortNamesAlpha([...new Set((data.names["Book Site Visit"] || []).filter(Boolean))]);
+}
+
+function bookSiteVisitStillOpen(data: CountedData): string[] {
+  return data.visitsOpen || [];
+}
+
+type CoverageSection = { title: string; body: string[] };
+
+/** Quoting + site-visit coverage blocks for personal cards (day / week / month). */
+function coverageSections(data: CountedData): CoverageSection[] {
+  const sections: CoverageSection[] = [];
+  const rqNames = uniqueRequiresQuoting(data);
+  if (rqNames.length > 0) {
+    const open = requiresQuotingStillOpen(data);
+    sections.push({
+      title: "✅ Quoting coverage",
+      body: open.length === 0
+        ? ["Complete 100%"]
+        : [`Still in need of quote: ${open.length} of ${rqNames.length}`, ...open.map(n => `- ${n}`)],
+    });
+  }
+  const bsvNames = uniqueBookSiteVisit(data);
+  if (bsvNames.length > 0) {
+    const open = bookSiteVisitStillOpen(data);
+    sections.push({
+      title: "✅ Site visit coverage",
+      body: open.length === 0
+        ? ["Complete 100%"]
+        : [`Still in need of log: ${open.length} of ${bsvNames.length}`, ...open.map(n => `- ${n}`)],
+    });
+  }
+  return sections;
 }
 
 // ─── Message builders ────────────────────────────────────────────────
@@ -937,6 +1052,7 @@ function buildPeriodicMessage(opts: {
   rangeStart: string;
   data: CountedData;
   monthlyBreakdown?: MonthBreakdown[];
+  scope?: MessageScope;
   // Overrides for custom-range rendering (period-agnostic). When omitted the
   // period-derived title/label/isYear are used, preserving the cron formats.
   titleOverride?: string;
@@ -989,7 +1105,10 @@ function buildPeriodicMessage(opts: {
     lines.push(`Total Contacts Quoted: ${counts["Quote Sent"] || 0}`);
     lines.push(`Total Individual Quotes: ${counts["Total Individual Quotes"] || 0}`);
     lines.push(`${isYear ? "Total Pipeline Value" : "Pipeline Value"}: ${formatDollar(counts["Pipeline Value"] || 0)}`);
-    if (has("Site Visit Booked")) lines.push(`Site Visits: ${counts["Site Visit Booked"] || 0}`);
+    if (has("Site Visit Booked")) {
+      const sv = counts["Site Visits Booked"] || counts["Site Visit Booked"] || 0;
+      lines.push(`Site Visits Booked - ${sv}`);
+    }
     if (has("Job Won")) {
       const jobDetails = data.jobDetails;
       const jobCount = jobDetails.length > 0 ? jobDetails.length : (counts["Job Won"] || 0);
@@ -1030,13 +1149,23 @@ function buildPeriodicMessage(opts: {
     OUTCOMES.outcomes.filter(o => o.category === cat).reduce((sum, o) => sum + (counts[o.name] || 0), 0);
   const totalLost = sumCategory("lost");
   const totalAbandoned = sumCategory("abandoned");
-  const totalDQ = sumCategory("dq");
-  if (totalLost > 0 || totalAbandoned > 0 || totalDQ > 0) {
+  const dqLines = formatDqLinesFromOutcomes(data);
+  if (totalLost > 0 || totalAbandoned > 0 || dqLines.length > 0) {
     lines.push("");
     lines.push("🔴 Attrition");
     if (totalLost > 0) lines.push(`Lost: ${totalLost}`);
     if (totalAbandoned > 0) lines.push(`Abandoned: ${totalAbandoned}`);
-    if (totalDQ > 0) lines.push(`Disqualified: ${totalDQ}`);
+    lines.push(...dqLines);
+  }
+
+  // Personal month (and custom-range summary): same quoting / site-visit
+  // coverage as day + week cards. Team, quarter, and year stay count-only.
+  if (opts.scope !== "team" && !isYear && period !== "quarter") {
+    for (const section of coverageSections(data)) {
+      lines.push("");
+      lines.push(section.title);
+      lines.push(...section.body);
+    }
   }
 
   // Yearly extras: monthly breakdown table + best/quietest month
@@ -1099,18 +1228,20 @@ function buildMessage(opts: {
   if (period === "month" || period === "quarter" || period === "year") {
     return buildPeriodicMessage({
       period, companyLabel, personLabel, ownerName, rangeStart,
-      data, monthlyBreakdown: opts.monthlyBreakdown,
+      data, monthlyBreakdown: opts.monthlyBreakdown, scope,
     });
   }
 
-  // Team EOD (day) only — dedicated layout. Personal day + all weeks unchanged.
-  if (period === "day" && scope === "team") {
+  // Team day + week use the compact mock layout (DQ / pipeline dash rules).
+  if (scope === "team" && (period === "day" || period === "week")) {
     return buildTeamEODMessage({
       companyLabel,
       personLabel,
       ownerName,
       rangeEnd,
       data,
+      period,
+      rangeStart,
     });
   }
 
@@ -1122,6 +1253,15 @@ function buildMessage(opts: {
   const lines: string[] = buildHeader(period, companyLabel, personLabel, rangeStart, rangeEnd);
 
   for (const block of blocks) {
+    if (isDqBlock(block)) {
+      const dqLines = dqLinesForBlock(block, ownerName, data, !isTeam && period === "day");
+      if (dqLines.length > 0) {
+        lines.push(...dqLines);
+        lines.push(separator);
+      }
+      continue;
+    }
+
     const blockName = block.name.replace("{owner}", ownerName);
     const blockLines: string[] = [];
     for (const tpl of block.outcomes || []) {
@@ -1134,25 +1274,21 @@ function buildMessage(opts: {
       if (line) blockLines.push(line);
     }
     if (blockLines.length > 0) {
-      lines.push(blockName);
+      const heading = (block.outcomes || []).includes("Site Visit Booked")
+        ? siteVisitsHeader(blockName, data.siteVisits)
+        : blockName;
+      lines.push(heading);
       lines.push(...blockLines);
       lines.push(separator);
     }
   }
 
-  // Personal day + week: flag Requires Quoting contacts that still have no
-  // Quote Sent in this period, so coverage is obvious without leaving the card.
+  // Personal day + week: flag Requires Quoting / Book Site Visit contacts
+  // that still have no matching send or log in this period.
   if ((period === "week" || period === "day") && !isTeam) {
-    const rqNames = uniqueRequiresQuoting(data);
-    if (rqNames.length > 0) {
-      const open = requiresQuotingStillOpen(data);
-      lines.push("✅ Quoting coverage");
-      if (open.length === 0) {
-        lines.push("Complete 100%");
-      } else {
-        lines.push(`Still in need of quote: ${open.length} of ${rqNames.length}`);
-        for (const name of open) lines.push(`- ${name}`);
-      }
+    for (const section of coverageSections(data)) {
+      lines.push(section.title);
+      lines.push(...section.body);
       lines.push(separator);
     }
   }
@@ -1215,6 +1351,15 @@ function buildDetailedRangeMessage(opts: {
     // Team: skip Action Lists and Notes-related noise — keep quotes / SVs / jobs.
     if (isTeam && block.name.startsWith("📝")) continue;
 
+    if (isDqBlock(block)) {
+      const dqLines = dqLinesForBlock(block, ownerName, data, !isTeam);
+      if (dqLines.length > 0) {
+        lines.push(...dqLines);
+        lines.push(separator);
+      }
+      continue;
+    }
+
     const blockName = block.name.replace("{owner}", ownerName);
     const blockLines: string[] = [];
     for (const tpl of block.outcomes || []) {
@@ -1225,7 +1370,10 @@ function buildDetailedRangeMessage(opts: {
       if (line) blockLines.push(line);
     }
     if (blockLines.length > 0) {
-      lines.push(blockName);
+      const heading = (block.outcomes || []).includes("Site Visit Booked")
+        ? siteVisitsHeader(blockName, data.siteVisits)
+        : blockName;
+      lines.push(heading);
       lines.push(...blockLines);
       lines.push(separator);
     }
@@ -1276,6 +1424,8 @@ function buildRangeMessage(opts: {
       ownerName: opts.ownerName,
       rangeEnd: opts.rangeEnd,
       data: opts.data,
+      period: "day",
+      rangeStart: opts.rangeStart,
     });
   }
 
@@ -1287,6 +1437,7 @@ function buildRangeMessage(opts: {
     ownerName: opts.ownerName,
     rangeStart: opts.rangeStart,
     data: opts.data,
+    scope: opts.scope,
     titleOverride: "PERFORMANCE REPORT",
     labelOverride: rangeLabelText(opts.rangeStart, opts.rangeEnd),
     isYearOverride: false,
@@ -1297,7 +1448,7 @@ function buildRangeMessage(opts: {
 
 const PAGE_SIZE = 1000;
 const ACTIVITY_SELECT =
-  "id, company_id, sales_person_id, sales_person_name, occurred_on, event_type, contact_name, contact_id, contact_address, outcome, ad_source, quote_job_value, appointment_at";
+  "id, company_id, sales_person_id, sales_person_name, occurred_on, event_type, contact_name, contact_id, contact_address, outcome, ad_source, quote_job_value, appointment_at, visit_kind";
 
 async function pageAll<T>(build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>): Promise<T[]> {
   const out: T[] = [];

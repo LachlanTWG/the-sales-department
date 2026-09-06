@@ -102,6 +102,7 @@ export default async function VisitsPage({ searchParams }: { searchParams: Promi
   const periodVisits = visits.filter(v => v.dayKey >= periodStart && v.dayKey <= periodEnd);
   const totalCount = periodVisits.length;
   const tbcCount = periodVisits.filter(v => !v.scheduled).length;
+  const virtualCount = periodVisits.filter(v => v.virtual).length;
 
   // Preserve filters across nav/view links.
   function href(overrides: Partial<SearchParams>) {
@@ -138,6 +139,7 @@ export default async function VisitsPage({ searchParams }: { searchParams: Promi
           <div className="text-2xl font-semibold tabular-nums text-zinc-100">{totalCount}</div>
           <div className="text-xs text-zinc-500">
             visit{totalCount === 1 ? "" : "s"} · {title}
+            {virtualCount > 0 && <span className="text-violet-400/80"> · {virtualCount} virtual</span>}
             {tbcCount > 0 && <span className="text-amber-400/80"> · {tbcCount} time TBC</span>}
           </div>
         </div>

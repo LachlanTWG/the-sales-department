@@ -181,6 +181,8 @@ function findStage(stages: Stage[], candidates: string[]): Stage | null {
 // specific first. Pre/post "Not Ready Yet" variants cover Bolton ("Not
 // Ready Yet" / "Not Ready Yet - Post Quote"), HDK ("Not Ready for Site
 // Visit" / "Not Ready Yet - Follow Up List") and the canonical shape.
+// Popup EOD 3 is a single "Not Ready Yet - Pre-Quote" (hyphen-less "Pre Quote"
+// is folded at the dropdown); the notready* prefix still matches both.
 const NOT_READY_PRE = ["Not Ready Yet - Pre-Quote", "Not Ready Yet", "Not Ready for Site Visit", "Not Yet Ready"];
 const NOT_READY_POST = ["Not Ready Yet - Post-Quote", "Not Ready Yet - Post Quote", "Not Ready Yet - Follow Up List", "Added to PQS Follow Up List"];
 const DAY_LADDER = ["Inbound Lead", "Day 1", "Day 2", "Day 3", "Day 4", "Day 5"];

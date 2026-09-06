@@ -2,7 +2,7 @@ const { getOutcomeNames } = require('../sheets/createCompanySheet');
 const { loadConfig } = require('../config/configLoader');
 const { countOutcomes } = require('./generateEOD');
 const { cleanAddress } = require('./addressFormat');
-const { displayLabel } = require('./displayLabels');
+const { displayLabel, formatDqLine } = require('./displayLabels');
 
 function formatMonth(year, month) {
   const months = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -63,7 +63,14 @@ async function generateEOM(spreadsheetId, salesPerson, year, month, companyName,
   const { outcomes } = loadConfig(companyName);
   const outcomeNames = getOutcomeNames(ownerName, companyName);
 
-  const data = countOutcomes(monthRows, ownerName, companyName, allParsed);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const monthEnd = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  const forExec = salesPerson && salesPerson !== 'Team' ? salesPerson : undefined;
+  const data = countOutcomes(monthRows, ownerName, companyName, allParsed, {
+    forExec,
+    rangeStart: monthStart,
+    rangeEnd: monthEnd,
+  });
   const monthlyCounts = {};
   for (const name of outcomeNames) {
     monthlyCounts[name] = data.counts[name] || 0;
@@ -115,7 +122,10 @@ async function generateEOM(spreadsheetId, salesPerson, year, month, companyName,
     lines.push(`Total Contacts Quoted: ${monthlyCounts['Quote Sent'] || 0}`);
     lines.push(`Total Individual Quotes: ${monthlyCounts['Total Individual Quotes'] || 0}`);
     lines.push(`Pipeline Value: ${formatDollar(monthlyCounts['Pipeline Value'] || 0)}`);
-    if (has('Site Visit Booked')) lines.push(`Site Visits: ${monthlyCounts['Site Visit Booked'] || 0}`);
+    if (has('Site Visit Booked')) {
+      const sv = monthlyCounts['Site Visits Booked'] || monthlyCounts['Site Visit Booked'] || 0;
+      lines.push(`Site Visits Booked - ${sv}`);
+    }
     if (has('Job Won')) {
       const jobCount = jobDetails.length > 0 ? jobDetails.length : (monthlyCounts['Job Won'] || 0);
       lines.push(`Jobs Won: ${jobCount}`);
@@ -160,7 +170,39 @@ async function generateEOM(spreadsheetId, salesPerson, year, month, companyName,
     lines.push('🔴 Attrition');
     if (totalLost > 0) lines.push(`Lost: ${totalLost}`);
     if (totalAbandoned > 0) lines.push(`Abandoned: ${totalAbandoned}`);
-    if (totalDQ > 0) lines.push(`Disqualified: ${totalDQ}`);
+    for (const o of dqOutcomes) {
+      const n = monthlyCounts[o.name] || 0;
+      if (n > 0) lines.push(formatDqLine(o.name, n));
+    }
+  }
+
+  // Personal: quoting / site-visit coverage for the month (same rules as EOD).
+  if (salesPerson && salesPerson !== 'Team') {
+    const rqNames = [...new Set((data.names['Requires Quoting'] || []).filter(Boolean))];
+    if (rqNames.length > 0) {
+      const open = data.quotingOpen || [];
+      lines.push('');
+      lines.push('✅ Quoting coverage');
+      if (open.length === 0) {
+        lines.push('Complete 100%');
+      } else {
+        lines.push(`Still in need of quote: ${open.length} of ${rqNames.length}`);
+        for (const name of open) lines.push(`- ${name}`);
+      }
+    }
+
+    const bsvNames = [...new Set((data.names['Book Site Visit'] || []).filter(Boolean))];
+    if (bsvNames.length > 0) {
+      const open = data.visitsOpen || [];
+      lines.push('');
+      lines.push('✅ Site visit coverage');
+      if (open.length === 0) {
+        lines.push('Complete 100%');
+      } else {
+        lines.push(`Still in need of log: ${open.length} of ${bsvNames.length}`);
+        for (const name of open) lines.push(`- ${name}`);
+      }
+    }
   }
 
   const message = lines.join('\n');

@@ -20,6 +20,7 @@ import {
   completePendingSiteVisit,
   dismissPendingSiteVisit,
   fetchQuotieTeamMembers,
+  loadPreviousQuotes,
   submitEodEntry,
   type EodEntryInput,
 } from "./actions";
@@ -37,10 +38,27 @@ function isUnassignedExec(name: string | null | undefined): boolean {
   return !t || /^unknown$/i.test(t) || /^team$/i.test(t);
 }
 
+/** Pending booking matches the GHL contact currently open in the popup. */
+function isThisContactPending(
+  p: PendingSiteVisit,
+  contactId: string,
+  contactName: string,
+): boolean {
+  if (contactId && p.contactId && p.contactId === contactId) return true;
+  const page = (contactName || "").trim().toLowerCase();
+  const row = (p.contactName || "").trim().toLowerCase();
+  if (page && row && page === row) return true;
+  return false;
+}
+
 /**
  * Pending site visits are company-wide in the DB, but each exec only sees
  * their own queue (plus unassigned). Matches roster short names and full
  * names ("Lachlan" ≡ "Lachlan Boys").
+ *
+ * Exception: the contact you currently have open always surfaces — otherwise
+ * a booking assigned to you never appears until localStorage "eod-exec" is
+ * set (hard-to-discover first-time failure for Benji/Max/etc.).
  */
 function pendingBelongsToExec(p: PendingSiteVisit, me: string): boolean {
   if (isUnassignedExec(p.salesPersonName)) return true;
@@ -188,6 +206,7 @@ export function EodEntryForm({
   const [svComment, setSvComment] = useState("");
   /** Two-step delete: first click shows Confirm on the Delete slot. */
   const [confirmDeletePending, setConfirmDeletePending] = useState(false);
+  const [quotesLoading, setQuotesLoading] = useState(false);
 
   // Device identity for the pending queue (who *I* am) — independent of the
   // contact's GHL owner. Without this, opening Zac's contact made Lachlan see
@@ -208,12 +227,20 @@ export function EodEntryForm({
     "";
   const [salesPerson, setSalesPerson] = useState(initialSales);
 
-  // Only show pendings assigned to this device's exec (or unassigned).
-  // Deliberately uses viewerExec from localStorage — NOT the contact's GHL
-  // owner / form salesPerson, which can be Zac while Lachlan is looking.
+  // Show: (1) any pending for the contact currently open, always, and
+  // (2) this device's own queue for other contacts (plus unassigned).
+  // Device identity comes from localStorage — not GHL owner — so Lachlan on
+  // Zac's contact doesn't inherit Zac's whole company queue. Open-contact
+  // always wins so Benji on Martin White still sees the booking even if he
+  // has never picked his name in this browser yet.
   const myPendings = useMemo(
-    () => openPendings.filter(p => pendingBelongsToExec(p, viewerExec)),
-    [openPendings, viewerExec],
+    () =>
+      openPendings.filter(
+        p =>
+          isThisContactPending(p, contactId, contactName) ||
+          pendingBelongsToExec(p, viewerExec),
+      ),
+    [openPendings, viewerExec, contactId, contactName],
   );
 
   // Each exec's browser remembers who they are: pick your name once and every
@@ -230,7 +257,8 @@ export function EodEntryForm({
 
     // Prefill the form's sales person from GHL contact owner when present;
     // otherwise fall back to this device's remembered exec. Viewer identity
-    // for the pending queue stays on localStorage (above), not GHL owner.
+    // for the company-wide pending queue stays on localStorage (above), not
+    // GHL owner — open-contact pendings still surface without it.
     if (defaultSalesPerson && people.includes(defaultSalesPerson)) {
       setSalesPerson(defaultSalesPerson);
       return;
@@ -241,33 +269,26 @@ export function EodEntryForm({
     } catch { /* ignore */ }
   }, [defaultSalesPerson, people]);
 
-  // Auto-open the site-visit log form when THIS contact has a pending booking
-  // that belongs to the current exec (never auto-open someone else's).
+  // Auto-open the site-visit log form when THIS contact has a pending booking.
+  // (Never auto-open a different lead's booking — that used to surface Zac's
+  // booking while Lachlan was looking at someone else.)
   useEffect(() => {
     if (activePending || myPendings.length === 0) return;
-    const matchById = contactId
-      ? myPendings.find(p => p.contactId && p.contactId === contactId)
-      : null;
-    const matchByName = contactName
-      ? myPendings.find(
-          p => p.contactName && p.contactName.toLowerCase() === contactName.toLowerCase(),
-        )
-      : null;
-    // Only auto-open for the open contact — never a lone company-wide pending
-    // for a different lead (that used to surface Zac's booking on Lachlan).
-    const first = matchById || matchByName || null;
+    const first =
+      myPendings.find(p => isThisContactPending(p, contactId, contactName)) || null;
     if (first) applyPending(first);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contactId, contactName, myPendings.length, viewerExec]);
 
   // If the active form is someone else's booking (e.g. viewer just corrected
-  // their name), drop it so it doesn't stay open under the wrong exec.
+  // their name), drop it — unless it's for the contact currently open.
   useEffect(() => {
     if (!activePending) return;
-    if (!pendingBelongsToExec(activePending, viewerExec)) {
-      setActivePending(null);
-    }
-  }, [activePending, viewerExec]);
+    const keep =
+      isThisContactPending(activePending, contactId, contactName) ||
+      pendingBelongsToExec(activePending, viewerExec);
+    if (!keep) setActivePending(null);
+  }, [activePending, viewerExec, contactId, contactName]);
 
   function chooseSalesPerson(name: string) {
     setSalesPerson(name);
@@ -407,6 +428,29 @@ export function EodEntryForm({
     setError(null);
     setSavedCount(null);
     setPipelineNote(null);
+    // Open-contact quotes were already fetched with the page. Other queue
+    // rows skip live GHL on first paint — fill them in when Log is tapped.
+    if (
+      enriched.previousQuotes.length === 0 &&
+      (enriched.contactId || enriched.contactName) &&
+      !isThisContactPending(enriched, contactId, contactName)
+    ) {
+      setQuotesLoading(true);
+      loadPreviousQuotes({
+        token,
+        ghl_location_id: ghlLocationId,
+        contact_id: enriched.contactId,
+        contact_name: enriched.contactName,
+      }).then(quotes => {
+        setQuotesLoading(false);
+        if (!quotes.length) return;
+        setActivePending(curr =>
+          curr && curr.id === enriched.id ? { ...curr, previousQuotes: quotes } : curr,
+        );
+      }).catch(() => setQuotesLoading(false));
+    } else {
+      setQuotesLoading(false);
+    }
   }
 
   function cancelPendingLog() {
@@ -415,6 +459,7 @@ export function EodEntryForm({
     setSvIdealStart("");
     setSvComment("");
     setConfirmDeletePending(false);
+    setQuotesLoading(false);
   }
 
   function submitPendingSiteVisit(e: React.FormEvent) {
@@ -459,6 +504,7 @@ export function EodEntryForm({
         ideal_start_date: svIdealStart,
         details_comment: svComment,
         previous_quotes: activePending.previousQuotes,
+        visit_kind: activePending.visitKind,
       });
       if (!res.ok) { setError(res.error); return; }
       setSavedCount(res.count);
@@ -672,7 +718,7 @@ export function EodEntryForm({
           <form className="mb-4 space-y-3.5 rounded-lg border border-amber-800/60 bg-amber-950/20 p-3" onSubmit={submitPendingSiteVisit}>
             <div className="flex items-center justify-between gap-2">
               <div className="text-[11px] font-medium uppercase tracking-wider text-amber-300/90">
-                Log site visit · {activePending.vertical === "roofing" ? "Roofing" : "Solar"}
+                Log {activePending.visitKind === "virtual" ? "virtual " : ""}site visit · {activePending.vertical === "roofing" ? "Roofing" : "Solar"}
               </div>
               <button type="button" onClick={cancelPendingLog} className="text-[11px] text-zinc-500 hover:text-zinc-300">
                 Cancel
@@ -684,6 +730,10 @@ export function EodEntryForm({
               <AutoRow label="Phone" value={activePending.contactPhone || "—"} />
               <AutoRow label="Email" value={activePending.contactEmail || "—"} />
               <AutoRow label="Location" value={activePending.contactAddress || "—"} />
+              <AutoRow
+                label="Type"
+                value={activePending.visitKind === "virtual" ? "Virtual" : "In person"}
+              />
               <AutoRow
                 label="Visit time"
                 value={activePending.appointmentDisplay || activePending.appointmentRaw || "—"}
@@ -714,7 +764,11 @@ export function EodEntryForm({
               <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
                 Previous quotes
               </div>
-              {activePending.previousQuotes.length === 0 ? (
+              {quotesLoading && activePending.previousQuotes.length === 0 ? (
+                <p className="mt-1 text-[12px] text-zinc-500">
+                  Loading previous quotes…
+                </p>
+              ) : activePending.previousQuotes.length === 0 ? (
                 <p className="mt-1 text-[12px] text-zinc-500">
                   No previous quote has been sent.
                 </p>
@@ -801,7 +855,11 @@ export function EodEntryForm({
                 disabled={pending}
                 className="col-span-3 rounded bg-emerald-600/90 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
               >
-                {pending && !confirmDeletePending ? "Sending…" : "Log site visit → Slack"}
+                {pending && !confirmDeletePending
+                  ? "Sending…"
+                  : activePending.visitKind === "virtual"
+                    ? "Log virtual visit → Slack"
+                    : "Log site visit → Slack"}
               </button>
               <button
                 type="button"
@@ -1110,9 +1168,9 @@ export function EodEntryForm({
                                 className="mt-0.5 rounded border-zinc-600 bg-zinc-900"
                               />
                               <span>
-                                <span className="font-medium text-zinc-200">50/50 exec split</span>
+                                <span className="font-medium text-zinc-200">Team split</span>
                                 <span className="mt-0.5 block text-[11px] text-zinc-500">
-                                  Split SE share with the other exec on this client. Can combine with 50% charge.
+                                  Split SE share equally across the roster on this client (2- or 3-person teams). Can combine with 50% charge.
                                 </span>
                               </span>
                             </label>
@@ -1354,6 +1412,9 @@ function PendingVisitsBanner({
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium text-zinc-100">
                     {p.contactName || "Unknown contact"}
+                    {p.visitKind === "virtual" && (
+                      <span className="ml-1.5 text-[10px] font-normal text-violet-300">virtual</span>
+                    )}
                     {forThisContact && (
                       <span className="ml-1.5 text-[10px] font-normal text-sky-400">this contact</span>
                     )}

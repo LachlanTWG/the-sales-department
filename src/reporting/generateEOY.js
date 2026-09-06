@@ -2,7 +2,7 @@ const { getOutcomeNames } = require('../sheets/createCompanySheet');
 const { formatMonth, getTopSources } = require('./generateEOM');
 const { loadConfig } = require('../config/configLoader');
 const { countOutcomes } = require('./generateEOD');
-const { displayLabel } = require('./displayLabels');
+const { displayLabel, formatDqLine } = require('./displayLabels');
 
 function formatDollar(value) {
   return '$' + Math.round(value).toLocaleString('en-AU');
@@ -49,6 +49,8 @@ async function generateEOY(spreadsheetId, salesPerson, year, companyName, ownerN
   for (const name of outcomeNames) {
     yearlyCounts[name] = yearlyData.counts[name] || 0;
   }
+  const yearlyJobDetails = yearlyData.jobDetails || [];
+  const yearlyRevenue = yearlyJobDetails.reduce((sum, j) => sum + (j.value || 0), 0);
 
   // Per-month breakdown recomputed from the same rows
   const monthlyBreakdown = [];
@@ -61,7 +63,8 @@ async function generateEOY(spreadsheetId, salesPerson, year, companyName, ownerN
     for (const name of outcomeNames) {
       monthCounts[name] = monthData.counts[name] || 0;
     }
-    monthlyBreakdown.push({ month: monthPrefix, counts: monthCounts });
+    const monthRevenue = (monthData.jobDetails || []).reduce((sum, j) => sum + (j.value || 0), 0);
+    monthlyBreakdown.push({ month: monthPrefix, counts: monthCounts, revenue: monthRevenue });
   }
 
   const topSources = getTopSources(yearlyCounts, companyName);
@@ -112,8 +115,17 @@ async function generateEOY(spreadsheetId, salesPerson, year, companyName, ownerN
     lines.push(`Total Contacts Quoted: ${yearlyCounts['Quote Sent'] || 0}`);
     lines.push(`Total Individual Quotes: ${yearlyCounts['Total Individual Quotes'] || 0}`);
     lines.push(`Total Pipeline Value: ${formatDollar(yearlyCounts['Pipeline Value'] || 0)}`);
-    if (has('Site Visit Booked')) lines.push(`Site Visits: ${yearlyCounts['Site Visit Booked'] || 0}`);
-    if (has('Job Won')) lines.push(`Jobs Won: ${yearlyCounts['Job Won'] || 0}`);
+    if (has('Site Visit Booked')) {
+      const sv = yearlyCounts['Site Visits Booked'] || yearlyCounts['Site Visit Booked'] || 0;
+      lines.push(`Site Visits Booked - ${sv}`);
+    }
+    if (has('Job Won')) {
+      const jobCount = yearlyJobDetails.length > 0 ? yearlyJobDetails.length : (yearlyCounts['Job Won'] || 0);
+      lines.push(`Jobs Won: ${jobCount}`);
+      if (yearlyRevenue > 0) {
+        lines.push(`Total Revenue Generated: ${formatDollar(yearlyRevenue)}`);
+      }
+    }
   }
 
   // Agency metrics
@@ -136,14 +148,18 @@ async function generateEOY(spreadsheetId, salesPerson, year, companyName, ownerN
   // Attrition (dynamic from outcome categories)
   const totalLost = outcomes.outcomes.filter(o => o.category === 'lost').reduce((sum, o) => sum + (yearlyCounts[o.name] || 0), 0);
   const totalAbandoned = outcomes.outcomes.filter(o => o.category === 'abandoned').reduce((sum, o) => sum + (yearlyCounts[o.name] || 0), 0);
-  const totalDQ = outcomes.outcomes.filter(o => o.category === 'dq').reduce((sum, o) => sum + (yearlyCounts[o.name] || 0), 0);
+  const dqOutcomes = outcomes.outcomes.filter(o => o.category === 'dq');
+  const totalDQ = dqOutcomes.reduce((sum, o) => sum + (yearlyCounts[o.name] || 0), 0);
 
   if (totalLost > 0 || totalAbandoned > 0 || totalDQ > 0) {
     lines.push('');
     lines.push('🔴 Attrition');
     if (totalLost > 0) lines.push(`Lost: ${totalLost}`);
     if (totalAbandoned > 0) lines.push(`Abandoned: ${totalAbandoned}`);
-    if (totalDQ > 0) lines.push(`Disqualified: ${totalDQ}`);
+    for (const o of dqOutcomes) {
+      const n = yearlyCounts[o.name] || 0;
+      if (n > 0) lines.push(formatDqLine(o.name, n));
+    }
   }
 
   // Monthly breakdown table (dynamic columns)
@@ -152,13 +168,14 @@ async function generateEOY(spreadsheetId, salesPerson, year, companyName, ownerN
     lines.push('📊 Monthly Breakdown');
 
     if (has('Quote Sent')) {
-      lines.push('Month | Calls | Answered | Quotes | Site Visits | Jobs Won');
-      lines.push('------|-------|----------|--------|-------------|--------');
+      lines.push('Month | Calls | Answered | Quotes | Site Visits | Jobs Won | Revenue');
+      lines.push('------|-------|----------|--------|-------------|----------|--------');
       for (const m of monthlyBreakdown) {
         const parts = m.month.split('-');
         const label = formatMonth(parseInt(parts[0]), parseInt(parts[1]));
         const c = m.counts;
-        lines.push(`${label} | ${c[totalField] || 0} | ${c['Answered'] || 0} | ${c['Quote Sent'] || 0} | ${c['Site Visit Booked'] || 0} | ${c['Job Won'] || 0}`);
+        const rev = m.revenue > 0 ? formatDollar(m.revenue) : '$0';
+        lines.push(`${label} | ${c[totalField] || 0} | ${c['Answered'] || 0} | ${c['Quote Sent'] || 0} | ${c['Site Visit Booked'] || 0} | ${c['Job Won'] || 0} | ${rev}`);
       }
     } else {
       lines.push('Month | Contacts | Answered | Roadmaps | Deals');

@@ -53,11 +53,11 @@
     "Direct Lead passed on from Client": { "eod": 2, "eow": 11 },
     "Recommended Another Company": { "eod": 2, "eow": 11 },
     "Site Visit Booked": { "eod": 8, "eow": 8 },
-    "Site Visits Booked": { "eod": 3, "eow": 3 },
+    "Site Visits Booked": { "eod": 2, "eow": 11 },
     "Job Won": { "eod": 9, "eow": 9 },
     "Quote Sent": { "eod": 6, "eow": 6 },
     "Pipeline Value": { "eod": 7, "eow": 7 },
-    "Book Site Visit": { "eod": 4, "eow": 1 },
+    "Book Site Visit": { "eod": 4, "eow": 11 },
     "Total Individual Quotes": { "eod": 10, "eow": 10 },
     "Emails Sent": { "eod": 4, "eow": 11 }
   }

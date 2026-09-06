@@ -96,7 +96,7 @@ export function MailboxConnectPanel({
         <div className="border-b border-zinc-800 px-4 py-3">
           <div className="text-sm font-medium text-zinc-100">Your mailboxes</div>
           <p className="mt-0.5 text-xs text-zinc-500">
-            One connection per client. Defaults: HDK, LRS, Hughes, ECE → Gmail; all other clients → Outlook.
+            One connection per client. Gmail mailboxes must be on the Google tester list.
           </p>
         </div>
 
@@ -213,6 +213,16 @@ export function MailboxConnectPanel({
               {preferredProvider === "outlook"
                 ? " (Microsoft 365)."
                 : " (Google Workspace)."}
+            </p>
+          )}
+
+          {preferredProvider === "gmail" && (
+            <p className="mt-3 rounded border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-[11px] leading-relaxed text-amber-200/90">
+              Gmail is still in Google testing. If you see{" "}
+              <span className="text-amber-100">Access blocked</span> /{" "}
+              <span className="text-amber-100">has not completed the Google verification process</span>
+              , the mailbox isn&apos;t on the tester list yet. Send the address
+              (e.g. admin@client.com) to Lachlan to add, then connect again.
             </p>
           )}
 

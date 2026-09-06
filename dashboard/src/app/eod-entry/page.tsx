@@ -78,7 +78,7 @@ export default async function EodEntryPage({
   // team, with the client resolved per page view from the GHL location id in
   // the URL the exec is currently on.
   const supabase = createAdminClient();
-  let query = supabase.from("companies").select("id, name, slug, timezone, active, quotie_config");
+  let query = supabase.from("companies").select("id, name, slug, timezone, active, quotie_config, owner_name");
   if (slug === "agency") {
     if (!location) return <Notice>Open this from the EOD Logger extension inside GHL.</Notice>;
     query = query.eq("ghl_location_id", location);
@@ -106,17 +106,21 @@ export default async function EodEntryPage({
     content = <MeView exec={exec || ""} execNames={execNames} my={my} base={base} />;
   } else {
     const scraped = cleanScrapedName(cName);
-    const { data: peopleRows } = await supabase
+    const peoplePromise = supabase
       .from("sales_people")
       .select("name")
       .eq("company_id", company.id)
       .eq("active", true)
-      .order("name");
-    const people = (peopleRows ?? []).map(p => p.name);
+      .order("name")
+      .then(({ data }) => (data ?? []).map(p => p.name as string));
+    // Kick off independent work before the roster comes back.
+    const optionsPromise = fetchEodOptions(company.id, company.owner_name);
+    const historyPromise = fetchContactHistory(company.id, cId, scraped);
+    const people = await peoplePromise;
 
     const [options, history, ghl, pendingVisits] = await Promise.all([
-      fetchEodOptions(company.id),
-      fetchContactHistory(company.id, cId, scraped),
+      optionsPromise,
+      historyPromise,
       fetchGhlContact(location || "", cId, people),
       fetchPendingSiteVisits(company.id, company.name, company.slug, {
         ghlLocationId: location || "",

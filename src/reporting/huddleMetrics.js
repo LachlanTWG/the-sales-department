@@ -141,6 +141,7 @@ function gridToRows(grid, companyName) {
     contactAddress: r[idx['Contact Address']],
     appointmentDateTime: r[idx['Appointment Date Time']],
     appointmentDate: r[idx['Appointment Date']],
+    visitKind: r[idx['Visit Kind']] || '',
   }));
 }
 
@@ -307,6 +308,7 @@ function upcomingSiteVisits(rows, execName, fromDate) {
       address: r.contactAddress || '',
       datetime: r.appointmentDateTime || '',
       date: r.appointmentDate || (r.appointmentDateTime || '').slice(0, 10),
+      virtual: String(r.visitKind || '').toLowerCase() === 'virtual',
     }))
     .sort((a, b) => (a.datetime || a.date).localeCompare(b.datetime || b.date));
 }

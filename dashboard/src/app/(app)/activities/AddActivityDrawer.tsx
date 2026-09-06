@@ -282,9 +282,9 @@ export function AddActivityDrawer({
                             className="mt-0.5 rounded border-zinc-600 bg-zinc-900"
                           />
                           <span>
-                            <span className="font-medium text-zinc-200">50/50 exec split</span>
+                            <span className="font-medium text-zinc-200">Team split</span>
                             <span className="mt-0.5 block text-[11px] text-zinc-500">
-                              Split SE share with the other exec on this client. Can combine with 50% charge.
+                              Split SE share equally across the roster on this client (2- or 3-person teams). Can combine with 50% charge.
                             </span>
                           </span>
                         </label>

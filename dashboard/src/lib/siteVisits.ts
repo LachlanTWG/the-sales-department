@@ -47,6 +47,7 @@ export type SiteVisit = {
   localCity: string | null;       // e.g. "Perth"
   scheduled: boolean;             // has a real appointment time
   sortMs: number;                 // ordering within a day (timed first, TBC last)
+  virtual: boolean;               // Virtual Site Visit (calendar name/title)
 };
 
 // Sydney-tz day formatter. en-CA renders the date as YYYY-MM-DD.
@@ -128,10 +129,11 @@ type ActivityRow = {
   quote_job_value: string | null;
   appointment_at: string | null;
   occurred_on: string;
+  visit_kind: string | null;
 };
 
 const SELECT =
-  "id, company_id, sales_person_id, sales_person_name, contact_name, contact_address, contact_id, ad_source, outcome, quote_job_value, appointment_at, occurred_on";
+  "id, company_id, sales_person_id, sales_person_name, contact_name, contact_address, contact_id, ad_source, outcome, quote_job_value, appointment_at, occurred_on, visit_kind";
 
 function toVisit(r: ActivityRow, clientTz: string): SiteVisit {
   const scheduled = !!r.appointment_at;
@@ -159,6 +161,7 @@ function toVisit(r: ActivityRow, clientTz: string): SiteVisit {
     localTimeLabel: instantIso && tzDiffers ? formatTimeInTz(instantIso, clientTz) : null,
     localCity: instantIso && tzDiffers ? tzCityLabel(clientTz) : null,
     scheduled,
+    virtual: String(r.visit_kind || "").toLowerCase() === "virtual",
     sortMs: instantIso
       ? new Date(instantIso).getTime()
       : new Date(`${r.occurred_on}T23:59:59Z`).getTime(),   // TBC sorts last in its day

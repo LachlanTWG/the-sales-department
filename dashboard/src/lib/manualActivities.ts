@@ -31,9 +31,10 @@ export type NewActivityItem = {
   ad_source?: string;
   quote_job_value?: string;
   appointment_at?: string; // "YYYY-MM-DDTHH:MM" from datetime-local
+  visit_kind?: "in_person" | "virtual";
   /** Job won only — used for Sales Exec Invoicing commission rows */
   quote_number?: string;
-  /** Job won only — 50/50 split with the other roster exec on that company */
+  /** Job won only — equal split across all active roster execs on that company */
   split_commission?: boolean;
   /**
    * Job won only — full commission schedule then /2 client charge
@@ -54,6 +55,7 @@ export type SheetActivity = {
   contactId: string;
   appointmentDateTime: string;
   appointmentDate: string;
+  visitKind?: "in_person" | "virtual";
   quoteNumber?: string;
   splitCommission?: boolean;
   halfCommissionCharge?: boolean;
@@ -105,6 +107,9 @@ export function buildSheetActivities(
     contactId: it.contact_id?.trim() || "",
     appointmentDateTime: it.appointment_at?.trim() || "",
     appointmentDate: it.appointment_at ? it.appointment_at.slice(0, 10) : "",
+    ...(eventType === "site_visit_booked" && it.visit_kind
+      ? { visitKind: it.visit_kind }
+      : {}),
     ...(eventType === "job_won"
       ? {
           quoteNumber: (it.quote_number || "").trim(),

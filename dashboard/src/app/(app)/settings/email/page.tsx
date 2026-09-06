@@ -5,6 +5,23 @@ import { isMailboxConnectConfigured } from "@/lib/mailboxConnect";
 
 export const dynamic = "force-dynamic";
 
+function friendlyMailboxError(raw: string) {
+  const s = raw.toLowerCase();
+  if (
+    s.includes("access_denied") ||
+    s.includes("verification") ||
+    s.includes("unverified") ||
+    s.includes("missing code") ||
+    s.includes("access blocked")
+  ) {
+    return (
+      "Google blocked this mailbox. The Gmail app is in testing — only approved testers can connect. " +
+      "Add the Google address as a test user in Google Cloud → Auth → Audience, then try again."
+    );
+  }
+  return raw;
+}
+
 export default async function EmailSettingsPage({
   searchParams,
 }: {
@@ -30,7 +47,7 @@ export default async function EmailSettingsPage({
 
   let flash: { kind: "ok" | "error"; message: string } | null = null;
   if (sp.error) {
-    flash = { kind: "error", message: sp.error };
+    flash = { kind: "error", message: friendlyMailboxError(sp.error) };
   } else if (sp.connected === "1") {
     const who = sp.provider === "outlook" ? "Outlook" : sp.provider === "gmail" ? "Gmail" : "Mailbox";
     const client = sp.company ? ` for ${sp.company}` : "";
@@ -50,8 +67,10 @@ export default async function EmailSettingsPage({
           Primary path for <span className="text-zinc-300">Email sent</span>.
           One mailbox per <span className="text-zinc-300">client</span> you sell
           for.{" "}
-          <span className="text-zinc-300">HDK / LRS / Hughes / ECE</span> →
-          Gmail; all other clients (incl. Bolton, Phased, Sunbridge) → Outlook.
+          <span className="text-zinc-300">Gmail</span> (HDK, LRS, Hughes, ECE,
+          Nexgen, Enervia) needs the mailbox on Google&apos;s tester list first.{" "}
+          <span className="text-zinc-300">Outlook</span> for Bolton, Phased,
+          Sunbridge.
         </p>
       </div>
 
@@ -87,7 +106,7 @@ export default async function EmailSettingsPage({
         <ol className="list-decimal space-y-2 pl-5">
           <li>
             For each client, pick that client → connect with the recommended
-            provider (Gmail for HDK/LRS/Hughes/ECE, Outlook otherwise).
+            provider (Gmail for Google Workspace clients, Outlook otherwise).
           </li>
           <li>
             Sent mail from that mailbox is attributed to{" "}

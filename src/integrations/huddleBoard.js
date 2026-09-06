@@ -144,7 +144,7 @@ function siteVisitsSection(visits) {
   if (!visits.length) return '### 🏠 Site visits (upcoming)\n_None booked._';
   const lines = visits.map(v => {
     const addr = cleanAddress(v.address);
-    return `- **${v.contact}** — ${v.company}${addr ? ` — ${addr}` : ''} — ${prettyVisit(v)}`;
+    return `- **${v.contact}** — ${v.company}${addr ? ` — ${addr}` : ''} — ${prettyVisit(v)}${v.virtual ? ' (virtual)' : ''}`;
   });
   return `### 🏠 Site visits (upcoming)\n${lines.join('\n')}`;
 }

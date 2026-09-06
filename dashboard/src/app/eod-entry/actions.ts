@@ -9,6 +9,7 @@
 
 import { verifyEodEntryToken } from "@/lib/eodEntryToken";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { isVirtualVisitPayload } from "@/lib/visitKind";
 import {
   moveEodOpportunity,
   parseMonetaryValue,
@@ -33,6 +34,7 @@ import {
   type QuotieConfig,
   type QuotieTeamMember,
 } from "./quotie";
+import { fetchPreviousQuotes, type PreviousQuote } from "./data";
 
 export type EodEntryInput = {
   token: string;
@@ -166,6 +168,7 @@ export type CompleteSiteVisitInput = {
   ideal_start_date?: string;
   details_comment?: string;
   previous_quotes?: { date: string; value: string; person: string; number?: string }[];
+  visit_kind?: "in_person" | "virtual";
 };
 
 /** Log a pending calendar booking: dual-write activity + Slack summary. */
@@ -212,6 +215,19 @@ export async function completePendingSiteVisit(
       : [input.details_comment?.trim() || ""];
   const outcome = outcomeBits.filter(Boolean).join(" · ");
 
+  const { data: pendingRow } = await supabase
+    .from("pending_site_visits")
+    .select("visit_kind, raw_payload")
+    .eq("id", input.pending_id.trim())
+    .eq("company_id", company.id)
+    .maybeSingle();
+  const visitKind: "in_person" | "virtual" =
+    input.visit_kind === "virtual"
+    || pendingRow?.visit_kind === "virtual"
+    || isVirtualVisitPayload(pendingRow?.raw_payload)
+      ? "virtual"
+      : "in_person";
+
   const items: NewActivityItem[] = [
     {
       contact_name: input.contact_name,
@@ -220,6 +236,7 @@ export async function completePendingSiteVisit(
       appointment_at: input.appointment_at || "",
       outcome,
       ad_source: "",
+      visit_kind: visitKind,
     },
   ];
   if (!isMeaningful(items[0])) {
@@ -272,6 +289,7 @@ export async function completePendingSiteVisit(
           idealStartDate: input.ideal_start_date || "",
           detailsComment: input.details_comment || "",
           previousQuotes: input.previous_quotes || [],
+          visitKind,
         }),
         cache: "no-store",
       });
@@ -307,6 +325,39 @@ export async function completePendingSiteVisit(
     pipeline: slackOk ? "Slack summary sent" : "Logged (Slack summary not sent)",
     pipelineOk: slackOk,
   };
+}
+
+/**
+ * Previous quotes for a pending visit that wasn't the open contact on first
+ * paint (those skip live GHL so the popup can render). Called when the exec
+ * taps Log on a different booking.
+ */
+export async function loadPreviousQuotes(input: {
+  token: string;
+  ghl_location_id?: string;
+  contact_id?: string;
+  contact_name?: string;
+}): Promise<PreviousQuote[]> {
+  const slug = verifyEodEntryToken(input.token || "");
+  if (!slug) return [];
+  const contactId = (input.contact_id || "").trim();
+  const contactName = (input.contact_name || "").trim();
+  if (!contactId && !contactName) return [];
+
+  const supabase = createAdminClient();
+  let query = supabase.from("companies").select("id, active");
+  if (slug === "agency") {
+    if (!input.ghl_location_id) return [];
+    query = query.eq("ghl_location_id", input.ghl_location_id);
+  } else {
+    query = query.eq("slug", slug);
+  }
+  const { data: company } = await query.maybeSingle();
+  if (!company || !company.active) return [];
+
+  return fetchPreviousQuotes(company.id, contactId, contactName, {
+    ghlLocationId: input.ghl_location_id,
+  });
 }
 
 /**
