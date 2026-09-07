@@ -264,7 +264,69 @@ function DayDrawer({ day, visits, onClose, onEdit }: { day: string; visits: Cale
   );
 }
 
-function VisitCard({ v, onEdit }: { v: CalendarVisit; onEdit: (v: CalendarVisit) => void }) {
+export function VisitSearchResults({
+  query,
+  visits,
+  capped,
+  companies,
+  salesPeople,
+}: {
+  query: string;
+  visits: CalendarVisit[];
+  capped: boolean;
+  companies: CompanyOption[];
+  salesPeople: SalesPersonOption[];
+}) {
+  const [editing, setEditing] = useState<CalendarVisit | null>(null);
+
+  const groups: { day: string; visits: CalendarVisit[] }[] = [];
+  for (const v of visits) {
+    const last = groups[groups.length - 1];
+    if (last && last.day === v.dayKey) last.visits.push(v);
+    else groups.push({ day: v.dayKey, visits: [v] });
+  }
+
+  return (
+    <>
+      {visits.length === 0 ? (
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 px-5 py-16 text-center text-sm text-zinc-500">
+          No site visits match “{query}”.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-6">
+          {capped && (
+            <p className="text-xs text-amber-400/80">
+              Showing the {visits.length} most recent matches. Narrow the search if the visit you want isn’t here.
+            </p>
+          )}
+          {groups.map(g => (
+            <section key={g.day}>
+              <h2 className="mb-2 text-sm font-medium text-zinc-300">{longHeading(g.day)}</h2>
+              <ul className="flex flex-col gap-3">
+                {g.visits.map(v => (
+                  <VisitCard key={v.id} v={v} onEdit={setEditing} emphasizeExec />
+                ))}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <EditDrawer
+          row={toEditRow(editing)}
+          companies={companies}
+          salesPeople={salesPeople}
+          canDelete={editing.canEdit}
+          currentCompanyName={editing.companyName}
+          onClose={() => setEditing(null)}
+        />
+      )}
+    </>
+  );
+}
+
+function VisitCard({ v, onEdit, emphasizeExec }: { v: CalendarVisit; onEdit: (v: CalendarVisit) => void; emphasizeExec?: boolean }) {
   const mapsHref = v.contactAddress
     ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(v.contactAddress)}`
     : null;
@@ -314,7 +376,7 @@ function VisitCard({ v, onEdit }: { v: CalendarVisit; onEdit: (v: CalendarVisit)
         <dl className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
           <div className="flex gap-1">
             <dt className="text-zinc-600">Exec:</dt>
-            <dd className="text-zinc-400">{v.execName}</dd>
+            <dd className={emphasizeExec ? "font-medium text-zinc-100" : "text-zinc-400"}>{v.execName}</dd>
           </div>
           {v.adSource && (
             <div className="flex gap-1">

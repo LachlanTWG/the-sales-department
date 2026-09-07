@@ -176,6 +176,74 @@ export type LoadSiteVisitsOpts = {
   companyTzById: Map<string, string>; // company_id → IANA tz, for appointment correction
 };
 
+export const SITE_VISIT_SEARCH_LIMIT = 100;
+
+export type SearchSiteVisitsOpts = {
+  query: string;
+  salesPersonIds: string[] | null;
+  companyId?: string;
+  companyTzById: Map<string, string>;
+  companies: { id: string; name: string }[];
+  salesPeople: { id: string; name: string }[];
+  limit?: number;
+};
+
+export type SearchSiteVisitsResult = {
+  visits: SiteVisit[];
+  capped: boolean;
+};
+
+// PostgREST or() values: strip chars that break the filter grammar or act
+// as LIKE wildcards. Same sanitiser as the Activities search box.
+function sanitiseSearch(raw: string): string {
+  return raw.replace(/[%_,"'\\()]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function searchOrFilter(
+  raw: string,
+  companies: { id: string; name: string }[],
+  salesPeople: { id: string; name: string }[],
+): string | null {
+  const needle = sanitiseSearch(raw);
+  if (!needle) return null;
+  const like = `"%${needle}%"`;
+  const lower = needle.toLowerCase();
+  const clauses = [
+    `contact_name.ilike.${like}`,
+    `contact_address.ilike.${like}`,
+    `sales_person_name.ilike.${like}`,
+    `outcome.ilike.${like}`,
+    `quote_job_value.ilike.${like}`,
+  ];
+  const companyIds = companies.filter(c => c.name.toLowerCase().includes(lower)).map(c => c.id);
+  if (companyIds.length) clauses.push(`company_id.in.(${companyIds.join(",")})`);
+  const personIds = salesPeople.filter(p => p.name.toLowerCase().includes(lower)).map(p => p.id);
+  if (personIds.length) clauses.push(`sales_person_id.in.(${personIds.join(",")})`);
+  return clauses.join(",");
+}
+
+function scopedSiteVisits(
+  supabase: SupabaseClient,
+  opts: { salesPersonIds: string[] | null; companyId?: string; companyTzById: Map<string, string> },
+) {
+  const { salesPersonIds, companyId, companyTzById } = opts;
+  let q = supabase.from("activities").select(SELECT).eq("event_type", "site_visit_booked");
+  const activeIds = [...companyTzById.keys()];
+  if (companyId) {
+    if (!companyTzById.has(companyId)) {
+      q = q.eq("company_id", "00000000-0000-0000-0000-000000000000");
+    } else {
+      q = q.eq("company_id", companyId);
+    }
+  } else if (activeIds.length > 0) {
+    q = q.in("company_id", activeIds);
+  } else {
+    q = q.eq("company_id", "00000000-0000-0000-0000-000000000000");
+  }
+  if (salesPersonIds) q = q.in("sales_person_id", salesPersonIds);
+  return q;
+}
+
 /**
  * Load every site visit whose Sydney appointment day falls within the visible
  * grid. Visits with no appointment time are placed on their booking date and
@@ -201,21 +269,7 @@ export async function loadSiteVisits(
   // Fresh scoped query per call — PostgREST builders are single-use, and
   // returning one lets TS infer the builder type without fragile generics.
   function scoped() {
-    let q = supabase.from("activities").select(SELECT).eq("event_type", "site_visit_booked");
-    const activeIds = [...companyTzById.keys()];
-    if (companyId) {
-      if (!companyTzById.has(companyId)) {
-        q = q.eq("company_id", "00000000-0000-0000-0000-000000000000");
-      } else {
-        q = q.eq("company_id", companyId);
-      }
-    } else if (activeIds.length > 0) {
-      q = q.in("company_id", activeIds);
-    } else {
-      q = q.eq("company_id", "00000000-0000-0000-0000-000000000000");
-    }
-    if (salesPersonIds) q = q.in("sales_person_id", salesPersonIds);
-    return q;
+    return scopedSiteVisits(supabase, { salesPersonIds, companyId, companyTzById });
   }
 
   const [scheduledRows, unscheduledRows] = await Promise.all([
@@ -241,4 +295,38 @@ export async function loadSiteVisits(
 
   visits.sort((a, b) => (a.dayKey < b.dayKey ? -1 : a.dayKey > b.dayKey ? 1 : a.sortMs - b.sortMs));
   return visits;
+}
+
+/**
+ * Search booked site visits by contact, address, exec, company, outcome, or
+ * quote value. Not clipped to the calendar grid — the whole point is looking
+ * up a visit from months ago. Newest first. Caps at `limit` (default 100).
+ */
+export async function searchSiteVisits(
+  supabase: SupabaseClient,
+  opts: SearchSiteVisitsOpts,
+): Promise<SearchSiteVisitsResult> {
+  const {
+    query, salesPersonIds, companyId, companyTzById, companies, salesPeople,
+    limit = SITE_VISIT_SEARCH_LIMIT,
+  } = opts;
+
+  if (salesPersonIds && salesPersonIds.length === 0) return { visits: [], capped: false };
+
+  const or = searchOrFilter(query, companies, salesPeople);
+  if (!or) return { visits: [], capped: false };
+
+  const { data, error } = await scopedSiteVisits(supabase, { salesPersonIds, companyId, companyTzById })
+    .or(or)
+    .order("occurred_on", { ascending: false })
+    .order("appointment_at", { ascending: false })
+    .range(0, limit); // inclusive: limit+1 rows so we can tell if we capped
+
+  if (error) throw error;
+
+  const rows = (data || []) as ActivityRow[];
+  const capped = rows.length > limit;
+  const visits = rows.slice(0, limit).map(r => toVisit(r, companyTzById.get(r.company_id) || SYDNEY_TZ));
+  visits.sort((a, b) => (a.dayKey > b.dayKey ? -1 : a.dayKey < b.dayKey ? 1 : b.sortMs - a.sortMs));
+  return { visits, capped };
 }
