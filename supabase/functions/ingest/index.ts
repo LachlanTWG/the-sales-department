@@ -7,6 +7,7 @@
 //   POST /webhook/ghl             (legacy alias of the above)
 //   POST /webhook/ghl/job-won     GHL Job Won
 //   POST /webhook/ghl/site-visit  GHL Site Visit Booked
+//   POST /webhook/quotie/site-visit  Quotie UI Site Visit Booked (source 'quotie')
 //   POST /webhook/quote           Make.com / Quotie Quote Sent
 //   POST /webhook/email           Make.com Email Sent
 //   POST /api/activities/manual   Dashboard manual entry (batch)
@@ -44,6 +45,11 @@ const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET");
 // Sales Exec Invoicing — optional. When set, Job Won manual entries also
 // write commission sheet rows (no GHL custom fields required).
 const COMMISSION_WEBHOOK_URL = (Deno.env.get("COMMISSION_WEBHOOK_URL") || "").trim();
+// Railway Node server base — used to forward the Slack booking summary from
+// the /webhook/quotie/site-visit route (the summary formatter + Slack config
+// still live there). Optional: when unset, the Slack leg is a no-op and the
+// activity insert still succeeds (never-block idiom, same as the dashboard).
+const NODE_SERVICE_URL = (Deno.env.get("NODE_SERVICE_URL") || "").trim();
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -386,6 +392,157 @@ Deno.serve(async (req) => {
         company: company.name,
         salesPerson: pending.salesPersonName,
         visitKind: pending.visitKind,
+      });
+    }
+
+    // ─── Quotie → EOD site-visit notifier ──────────────────────────────
+    // Quotie pushes bookings made in ITS UI here so they land in the tracker
+    // (activities, source 'quotie') and fire the Slack booking summary — the
+    // reverse direction of the EOD-3 → Quotie push. Company resolves by GHL
+    // location id (same helper as the GHL routes). Roster match on
+    // booked_by_name, falling back to "Team". Deduped on
+    // contact_name + visit_date + source 'quotie' so a retry/replay is a no-op.
+    if (pathname === "/webhook/quotie/site-visit") {
+      const qb = body as {
+        ghl_location_id?: string;
+        company_name?: string;
+        contact_name?: string;
+        contact_phone?: string;
+        contact_email?: string;
+        address?: string;
+        visit_date?: string;
+        visit_time?: string;
+        booked_by_name?: string;
+        ghl_appointment_id?: string;
+        quotie_site_visit_id?: string;
+      };
+
+      const locationId = String(qb.ghl_location_id || "").trim();
+      if (!locationId) return respond(400, { error: "Missing ghl_location_id" });
+      const company = await findCompany((c) => c.ghl_location_id === locationId);
+      if (!company) {
+        console.log(`[QUOTIE SITE VISIT] Unknown location: ${locationId}`);
+        // Persist for replay once the mapping is fixed (Quotie won't retry).
+        return respond(404, { error: `No company for location ${locationId}` }, null, body);
+      }
+
+      const contactName = String(qb.contact_name || "").trim();
+      const visitDate = String(qb.visit_date || "").trim();
+      if (!contactName) return respond(400, { error: "Missing contact_name" });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(visitDate)) {
+        return respond(400, { error: "visit_date must be YYYY-MM-DD" });
+      }
+
+      // Dedupe: skip if a quotie site_visit_booked activity already exists for
+      // this contact + date (idempotent under replay/retry).
+      const { data: dupe, error: dupeErr } = await supabase
+        .from("activities")
+        .select("id")
+        .eq("company_id", company.id)
+        .eq("source", "quotie")
+        .eq("event_type", "site_visit_booked")
+        .eq("contact_name", contactName)
+        .eq("occurred_on", visitDate)
+        .limit(1);
+      if (dupeErr) {
+        console.error(`[QUOTIE SITE VISIT] dedupe lookup ${company.name}: ${dupeErr.message}`);
+        return respond(200, { status: "error" }, `dedupe lookup failed: ${dupeErr.message.slice(0, 300)}`, body);
+      }
+      if (dupe && dupe.length > 0) {
+        console.log(`[QUOTIE SITE VISIT] ${company.name} / ${contactName} / ${visitDate} — duplicate, skipped`);
+        return respond(200, { skipped: "duplicate" });
+      }
+
+      // Roster match on booked_by_name (first-name canonical, like the GHL
+      // routes), else "Team" (→ sales_person_id null, unattributed).
+      const bookedBy = String(qb.booked_by_name || "").trim();
+      let salesPersonName = "Team";
+      if (bookedBy) {
+        const roster = await getRoster(company.id);
+        const first = bookedBy.split(" ")[0].toLowerCase();
+        const match =
+          roster.find((p) => p.active && p.name.toLowerCase() === bookedBy.toLowerCase()) ||
+          roster.find((p) => p.active && p.name.split(" ")[0].toLowerCase() === first);
+        salesPersonName = match?.name || "Team";
+      }
+
+      const visitTime = String(qb.visit_time || "").trim();
+      const address = String(qb.address || "").trim();
+      // Machine-safe appointment timestamp (Postgres-parseable) or null.
+      const appointmentAt =
+        visitTime && /^\d{2}:\d{2}/.test(visitTime) ? `${visitDate}T${visitTime.slice(0, 5)}` : "";
+
+      const activity: BuiltActivity = {
+        occurredOn: visitDate,
+        salesPersonName,
+        contactName,
+        eventType: "site_visit_booked",
+        outcome: "",
+        adSource: "",
+        quoteJobValue: "",
+        contactAddress: address,
+        contactId: "",
+        appointmentAt,
+        source: "quotie",
+      };
+
+      if (dryrun) {
+        const salesPersonId = await resolveSalesPersonId(company.id, salesPersonName);
+        return json(200, { status: "dryrun", row: toInsertRow(activity, { companyId: company.id, salesPersonId, rawPayload: body }) });
+      }
+
+      const { error: insErr } = await insertActivity(activity, company.id, body);
+      if (insErr) {
+        console.error(`[QUOTIE SITE VISIT] insert error ${company.name}: ${insErr}`);
+        return respond(200, { status: "error" }, `insert failed: ${insErr.slice(0, 400)}`, body);
+      }
+
+      // Forward the Slack booking summary to the Node server (best-effort —
+      // a Slack failure never fails the ingest, mirroring the dashboard).
+      let slackOk = false;
+      if (NODE_SERVICE_URL) {
+        try {
+          const res = await fetch(`${NODE_SERVICE_URL.replace(/\/+$/, "")}/api/site-visit-summary`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${WEBHOOK_SECRET}`,
+            },
+            body: JSON.stringify({
+              companyName: company.name,
+              salesPerson: salesPersonName,
+              contactName,
+              contactPhone: String(qb.contact_phone || "").trim(),
+              contactEmail: String(qb.contact_email || "").trim(),
+              contactAddress: address,
+              appointmentDisplay: appointmentAt || visitDate,
+              appointmentAt,
+              bookedOn: visitDate,
+              vertical: "roofing",
+              roughJobValue: "",
+              idealStartDate: "",
+              detailsComment: "",
+              previousQuotes: [],
+            }),
+          });
+          slackOk = res.ok;
+          if (!res.ok) {
+            const t = await res.text().catch(() => "");
+            console.error(`[QUOTIE SITE VISIT] slack ${res.status}: ${t.slice(0, 200)}`);
+          }
+        } catch (e) {
+          console.error(`[QUOTIE SITE VISIT] slack: ${String((e as Error)?.message ?? e)}`);
+        }
+      }
+
+      console.log(`[QUOTIE SITE VISIT] ${company.name} / ${salesPersonName} / ${contactName} (slack=${slackOk})`);
+      return respond(200, {
+        status: "logged",
+        type: "site-visit",
+        source: "quotie",
+        company: company.name,
+        salesPerson: salesPersonName,
+        slack: slackOk ? "sent" : "skipped",
       });
     }
 
