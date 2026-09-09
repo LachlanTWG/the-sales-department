@@ -234,6 +234,13 @@ type QuotieSiteVisitInput = {
   ideal_start?: string;
   details?: string;
   ghl_assigned_user_id?: string;
+  /**
+   * Existing GHL appointment id (GHL-originated / pending bookings). When set,
+   * Quotie LINKS the visit to that appointment instead of creating a new one —
+   * send create_ghl_appointment: false alongside it. (Param live on Quotie dev,
+   * deploying to prod.)
+   */
+  ghl_appointment_id?: string;
 };
 
 /**
@@ -434,6 +441,8 @@ export async function createQuotieSiteVisit(
   if (input.salesPersonName?.trim()) body.exec_name = input.salesPersonName.trim();
   if (assigned_to) body.assigned_to = assigned_to;
   if (input.ghl_assigned_user_id?.trim()) body.ghl_assigned_user_id = input.ghl_assigned_user_id.trim();
+  // GHL-originated bookings: link the existing appointment instead of creating one.
+  if (input.ghl_appointment_id?.trim()) body.ghl_appointment_id = input.ghl_appointment_id.trim();
   return postQuotie(config, "api-site-visits", body);
 }
 

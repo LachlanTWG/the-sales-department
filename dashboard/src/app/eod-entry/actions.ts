@@ -171,6 +171,285 @@ export type CompleteSiteVisitInput = {
   visit_kind?: "in_person" | "virtual";
 };
 
+/**
+ * The single site-visit booking flow, shared by BOTH entry points:
+ *   - completePendingSiteVisit (the pending-calendar banner "Log" button)
+ *   - submitEodEntry's EOD-3 "Book Site Visit" outcome
+ *
+ * Every booking runs the same four legs, each independently toggled by an
+ * EXPLICIT flag (never inferred inside the function) so the caller's intent is
+ * always visible at the call-site:
+ *   a. logActivity     — insert the site_visit_booked activity (postManualActivities)
+ *   b. sendSlack        — Slack booking summary via NODE_SERVICE_URL /api/site-visit-summary
+ *   c. createQuotie     — Quotie booking via createQuotieSiteVisit (needs quotie_config)
+ *   d. resolvePending   — resolve the matching pending_site_visits row so a booking
+ *                         handled here never resurfaces in the pending banner
+ *
+ * Never-throw idiom: a failure in any leg is caught, recorded, and never fails
+ * the other legs or the caller's submit. Each leg reports ok/detail back so the
+ * caller can compose its own result banner.
+ */
+type SiteVisitLegResult = { ran: boolean; ok: boolean; detail?: string };
+
+type HandleSiteVisitBookedInput = {
+  companyId: string;
+  companyName: string;
+  salesPersonName: string; // resolved roster name, or "Team"
+
+  // Booking details (shared shape both callers already have).
+  occurredOn: string; // YYYY-MM-DD — the log/booking date
+  contactName: string;
+  contactId?: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  contactAddress?: string;
+  appointmentDisplay?: string;
+  appointmentAt?: string; // ISO-ish / datetime-local
+  bookedOn?: string;
+  vertical: "roofing" | "solar";
+  /** In-person vs virtual visit (Lockie's visit-kind feature) — threaded into the activity + Slack summary. */
+  visitKind?: "in_person" | "virtual";
+  roughJobValue?: string;
+  idealStartDate?: string;
+  detailsComment?: string;
+  previousQuotes?: { date: string; value: string; person: string; number?: string }[];
+
+  // ── Explicit per-leg toggles + their inputs ──────────────────────────
+  logActivity: boolean;
+  sendSlack: boolean;
+
+  createQuotie: boolean;
+  quotieConfig?: QuotieConfig | null;
+  /**
+   * When linking a GHL-originated booking (pending path), pass the GHL
+   * appointment id so Quotie LINKS to the existing appointment instead of
+   * creating a new one. Undefined → Quotie creates the appointment
+   * (create_ghl_appointment gate below still applies).
+   */
+  ghlAppointmentId?: string;
+  /** Whether Quotie should create a GHL appointment (only relevant when NOT linking). */
+  createGhlAppointment?: boolean;
+  quotieAssignTo?: string;
+  quotieGhlAssignedUserId?: string;
+  quotieTime?: string;
+
+  resolvePending: boolean;
+  /** Direct pending row id when the caller already knows it (banner path). */
+  pendingId?: string;
+};
+
+type HandleSiteVisitBookedResult = {
+  activity: SiteVisitLegResult;
+  slack: SiteVisitLegResult;
+  quotie: SiteVisitLegResult;
+  pending: SiteVisitLegResult;
+};
+
+async function handleSiteVisitBooked(
+  supabase: ReturnType<typeof createAdminClient>,
+  input: HandleSiteVisitBookedInput,
+): Promise<HandleSiteVisitBookedResult> {
+  const result: HandleSiteVisitBookedResult = {
+    activity: { ran: false, ok: true },
+    slack: { ran: false, ok: true },
+    quotie: { ran: false, ok: true },
+    pending: { ran: false, ok: true },
+  };
+
+  // ── a. Activity log ───────────────────────────────────────────────────
+  if (input.logActivity) {
+    result.activity.ran = true;
+    try {
+      const outcomeBits =
+        input.vertical === "roofing"
+          ? [
+              input.roughJobValue ? `Rough $${String(input.roughJobValue).replace(/[$,\s]/g, "")}` : "",
+              input.idealStartDate ? `Start ${input.idealStartDate}` : "",
+              input.detailsComment?.trim() || "",
+            ]
+          : [input.detailsComment?.trim() || ""];
+      const outcome = outcomeBits.filter(Boolean).join(" · ");
+
+      const items: NewActivityItem[] = [
+        {
+          contact_name: input.contactName,
+          contact_id: input.contactId,
+          contact_address: input.contactAddress,
+          appointment_at: input.appointmentAt || "",
+          outcome,
+          ad_source: "",
+          ...(input.visitKind ? { visit_kind: input.visitKind } : {}),
+        },
+      ];
+      if (!isMeaningful(items[0])) {
+        result.activity = { ran: true, ok: false, detail: "Contact name is required" };
+      } else {
+        const activities = buildSheetActivities(
+          input.occurredOn,
+          "site_visit_booked",
+          input.salesPersonName,
+          items,
+        );
+        // DB/sheet need a parseable timestamp — NEVER the AU display string.
+        const machineAppt = toMachineAppointmentAt(input.appointmentAt, input.appointmentDisplay);
+        if (machineAppt) activities[0].appointmentDateTime = machineAppt;
+
+        const posted = await postManualActivities(input.companyName, activities);
+        result.activity = posted.ok
+          ? { ran: true, ok: true }
+          : { ran: true, ok: false, detail: posted.error };
+      }
+    } catch (e) {
+      result.activity = { ran: true, ok: false, detail: (e as Error).message };
+    }
+  }
+
+  // ── b. Slack booking summary ──────────────────────────────────────────
+  if (input.sendSlack) {
+    result.slack.ran = true;
+    const base = process.env.NODE_SERVICE_URL;
+    const secret = process.env.WEBHOOK_SECRET;
+    if (!base) {
+      result.slack = { ran: true, ok: false, detail: "Slack summary not sent (service not configured)" };
+    } else {
+      try {
+        const res = await fetch(new URL("/api/site-visit-summary", base).toString(), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
+          },
+          body: JSON.stringify({
+            companyName: input.companyName,
+            salesPerson: input.salesPersonName,
+            contactName: input.contactName,
+            contactPhone: input.contactPhone || "",
+            contactEmail: input.contactEmail || "",
+            contactAddress: input.contactAddress || "",
+            appointmentDisplay: input.appointmentDisplay || input.appointmentAt || "",
+            appointmentAt: input.appointmentAt || "",
+            bookedOn: input.bookedOn || input.occurredOn,
+            vertical: input.vertical,
+            roughJobValue: input.roughJobValue || "",
+            idealStartDate: input.idealStartDate || "",
+            detailsComment: input.detailsComment || "",
+            previousQuotes: input.previousQuotes || [],
+            ...(input.visitKind ? { visitKind: input.visitKind } : {}),
+          }),
+          cache: "no-store",
+        });
+        if (res.ok) {
+          result.slack = { ran: true, ok: true };
+        } else {
+          const t = await res.text().catch(() => "");
+          console.error("[handleSiteVisitBooked] slack", res.status, t.slice(0, 200));
+          result.slack = { ran: true, ok: false, detail: `Slack summary not sent (${res.status})` };
+        }
+      } catch (e) {
+        console.error("[handleSiteVisitBooked] slack", (e as Error).message);
+        result.slack = { ran: true, ok: false, detail: "Slack summary not sent" };
+      }
+    }
+  }
+
+  // ── c. Quotie booking ─────────────────────────────────────────────────
+  if (input.createQuotie && input.quotieConfig?.api_key) {
+    result.quotie.ran = true;
+    try {
+      // Linking an existing GHL-originated appointment → never create a new one.
+      const linking = Boolean(input.ghlAppointmentId?.trim());
+      const res = await createQuotieSiteVisit(input.quotieConfig, {
+        date: input.occurredOn,
+        time: input.quotieTime,
+        contact_name: input.contactName,
+        contact_phone: input.contactPhone,
+        contact_email: input.contactEmail,
+        ghl_contact_id: input.contactId,
+        address: input.contactAddress,
+        salesPersonName: input.salesPersonName,
+        assign_to: input.quotieAssignTo,
+        create_ghl_appointment: linking ? false : (input.createGhlAppointment ?? true),
+        rough_job_value: input.roughJobValue,
+        ideal_start: input.idealStartDate,
+        details: input.detailsComment,
+        ghl_assigned_user_id: input.quotieGhlAssignedUserId,
+        ghl_appointment_id: input.ghlAppointmentId,
+      });
+      if (res.ok) {
+        const parts: string[] = [];
+        if (res.ghl?.status === "created") {
+          const assignee = res.ghl.assigned_user_name || res.ghl.assigned_user_id;
+          if (assignee) parts.push(`GHL appt → ${assignee}`);
+        }
+        if (res.warnings?.length) parts.push(res.warnings.join("; "));
+        result.quotie = { ran: true, ok: true, detail: parts.join("; ") || undefined };
+      } else {
+        result.quotie = { ran: true, ok: false, detail: res.error };
+      }
+    } catch (e) {
+      result.quotie = { ran: true, ok: false, detail: (e as Error).message };
+    }
+  }
+
+  // ── d. Resolve the matching pending row ───────────────────────────────
+  // Closes the double-handling loop: a booking handled here can never
+  // resurface in the pending banner. Prefer a known pending id; otherwise
+  // best-effort match on contact + appointment time.
+  if (input.resolvePending) {
+    result.pending.ran = true;
+    try {
+      const patch: Record<string, unknown> = { resolved_at: new Date().toISOString() };
+      // The banner path also persists the manually-filled summary fields.
+      if (input.pendingId?.trim()) {
+        patch.rough_job_value = input.roughJobValue || null;
+        patch.ideal_start_date = input.idealStartDate || null;
+        patch.details_comment = input.detailsComment || null;
+        patch.vertical = input.vertical;
+        patch.summary_sent_at = result.slack.ok && result.slack.ran ? new Date().toISOString() : null;
+      }
+
+      let q = supabase
+        .from("pending_site_visits")
+        .update(patch)
+        .eq("company_id", input.companyId)
+        .is("resolved_at", null);
+
+      if (input.pendingId?.trim()) {
+        q = q.eq("id", input.pendingId.trim());
+      } else {
+        // Pre-resolve any open pending row for this contact + appointment time
+        // so an EOD-3-handled booking never resurfaces in the banner. Match on
+        // contact (id when known, else name) and the parsed appointment instant.
+        q = q.is("dismissed_at", null);
+        if (input.contactId?.trim()) {
+          q = q.eq("contact_id", input.contactId.trim());
+        } else if (input.contactName?.trim()) {
+          q = q.eq("contact_name", input.contactName.trim());
+        } else {
+          // Nothing to match on — skip rather than resolving unrelated rows.
+          result.pending = { ran: true, ok: true, detail: "no match key" };
+          return result;
+        }
+        const machineAppt = toMachineAppointmentAt(input.appointmentAt, input.appointmentDisplay);
+        if (machineAppt) q = q.eq("appointment_at", machineAppt);
+      }
+
+      const { error } = await q;
+      if (error) {
+        console.error("[handleSiteVisitBooked] resolve pending:", error.message);
+        result.pending = { ran: true, ok: false, detail: error.message };
+      } else {
+        result.pending = { ran: true, ok: true };
+      }
+    } catch (e) {
+      console.error("[handleSiteVisitBooked] resolve pending:", (e as Error).message);
+      result.pending = { ran: true, ok: false, detail: (e as Error).message };
+    }
+  }
+
+  return result;
+}
+
 /** Log a pending calendar booking: dual-write activity + Slack summary. */
 export async function completePendingSiteVisit(
   input: CompleteSiteVisitInput,
@@ -181,7 +460,7 @@ export async function completePendingSiteVisit(
   if (!isIsoDate(input.occurred_on)) return { ok: false, error: "Date must be YYYY-MM-DD" };
 
   const supabase = createAdminClient();
-  let query = supabase.from("companies").select("id, name, slug, active");
+  let query = supabase.from("companies").select("id, name, slug, active, quotie_config");
   if (slug === "agency") {
     if (!input.ghl_location_id) return { ok: false, error: "Missing GHL location" };
     query = query.eq("ghl_location_id", input.ghl_location_id);
@@ -204,17 +483,7 @@ export async function completePendingSiteVisit(
     salesPersonName = person.name;
   }
 
-  // Compact outcome for the activity log / EOD reports (Slack gets the full summary).
-  const outcomeBits =
-    input.vertical === "roofing"
-      ? [
-          input.rough_job_value ? `Rough $${String(input.rough_job_value).replace(/[$,\s]/g, "")}` : "",
-          input.ideal_start_date ? `Start ${input.ideal_start_date}` : "",
-          input.details_comment?.trim() || "",
-        ]
-      : [input.details_comment?.trim() || ""];
-  const outcome = outcomeBits.filter(Boolean).join(" · ");
-
+  // Pending row carries visit_kind + the raw GHL payload (virtual detection).
   const { data: pendingRow } = await supabase
     .from("pending_site_visits")
     .select("visit_kind, raw_payload")
@@ -228,102 +497,58 @@ export async function completePendingSiteVisit(
       ? "virtual"
       : "in_person";
 
-  const items: NewActivityItem[] = [
-    {
-      contact_name: input.contact_name,
-      contact_id: input.contact_id,
-      contact_address: input.contact_address,
-      appointment_at: input.appointment_at || "",
-      outcome,
-      ad_source: "",
-      visit_kind: visitKind,
-    },
-  ];
-  if (!isMeaningful(items[0])) {
+  // Fail fast on the one hard requirement (contact name) before the shared
+  // handler — keeps the caller-facing error identical to the old flow.
+  if (!isMeaningful({ contact_name: input.contact_name, contact_id: input.contact_id, contact_address: input.contact_address, appointment_at: input.appointment_at, outcome: "x" })) {
     return { ok: false, error: "Contact name is required" };
   }
 
-  const activities = buildSheetActivities(
-    input.occurred_on,
-    "site_visit_booked",
+  const legs = await handleSiteVisitBooked(supabase, {
+    companyId: company.id,
+    companyName: company.name,
     salesPersonName,
-    items,
-  );
-  // DB/sheet need a parseable timestamp — NEVER the AU display string
-  // (e.g. "31/07/2026 3:30 PM" blows up Postgres). Prefer ISO-ish
-  // appointment_at; fall back to raw display only if it looks machine-safe.
-  const machineAppt = toMachineAppointmentAt(
-    input.appointment_at,
-    input.appointment_display,
-  );
-  if (machineAppt) {
-    activities[0].appointmentDateTime = machineAppt;
-  }
-  const posted = await postManualActivities(company.name, activities);
-  if (!posted.ok) return posted;
+    occurredOn: input.occurred_on,
+    contactName: input.contact_name,
+    contactId: input.contact_id,
+    contactPhone: input.contact_phone,
+    contactEmail: input.contact_email,
+    contactAddress: input.contact_address,
+    appointmentDisplay: input.appointment_display,
+    appointmentAt: input.appointment_at,
+    bookedOn: input.booked_on,
+    vertical: input.vertical,
+    visitKind,
+    roughJobValue: input.rough_job_value,
+    idealStartDate: input.ideal_start_date,
+    detailsComment: input.details_comment,
+    previousQuotes: input.previous_quotes,
+    // Pending-banner path: log activity + Slack (as before) AND now also push
+    // to Quotie. The booking already exists in GHL (calendar-originated), so we
+    // do NOT create a duplicate GHL appointment. No appointment id is captured
+    // from the GHL calendar webhook (raw_payload gap — see briefing), so Quotie
+    // records the visit without linking to the appointment.
+    logActivity: true,
+    sendSlack: true,
+    createQuotie: true,
+    quotieConfig: company.quotie_config as QuotieConfig | null | undefined,
+    ghlAppointmentId: undefined,
+    createGhlAppointment: false,
+    resolvePending: true,
+    pendingId: input.pending_id.trim(),
+  });
 
-  // Slack booking summary on the client's EOD channel.
-  let slackOk = false;
-  const base = process.env.NODE_SERVICE_URL;
-  const secret = process.env.WEBHOOK_SECRET;
-  if (base) {
-    try {
-      const res = await fetch(new URL("/api/site-visit-summary", base).toString(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
-        },
-        body: JSON.stringify({
-          companyName: company.name,
-          salesPerson: salesPersonName,
-          contactName: input.contact_name,
-          contactPhone: input.contact_phone || "",
-          contactEmail: input.contact_email || "",
-          contactAddress: input.contact_address || "",
-          appointmentDisplay: input.appointment_display || input.appointment_at || "",
-          appointmentAt: input.appointment_at || "",
-          bookedOn: input.booked_on || input.occurred_on,
-          vertical: input.vertical,
-          roughJobValue: input.rough_job_value || "",
-          idealStartDate: input.ideal_start_date || "",
-          detailsComment: input.details_comment || "",
-          previousQuotes: input.previous_quotes || [],
-          visitKind,
-        }),
-        cache: "no-store",
-      });
-      slackOk = res.ok;
-      if (!res.ok) {
-        const t = await res.text().catch(() => "");
-        console.error("[completePendingSiteVisit] slack", res.status, t.slice(0, 200));
-      }
-    } catch (e) {
-      console.error("[completePendingSiteVisit] slack", (e as Error).message);
-    }
+  // Preserve the old caller contract: the activity leg is the hard gate.
+  if (!legs.activity.ok) {
+    return { ok: false, error: legs.activity.detail || "Could not log the site visit" };
   }
 
-  const { error: resolveErr } = await supabase
-    .from("pending_site_visits")
-    .update({
-      resolved_at: new Date().toISOString(),
-      rough_job_value: input.rough_job_value || null,
-      ideal_start_date: input.ideal_start_date || null,
-      details_comment: input.details_comment || null,
-      vertical: input.vertical,
-      summary_sent_at: slackOk ? new Date().toISOString() : null,
-    })
-    .eq("id", input.pending_id.trim())
-    .eq("company_id", company.id)
-    .is("resolved_at", null);
-  if (resolveErr) {
-    console.error("[completePendingSiteVisit] resolve:", resolveErr.message);
-  }
-
+  const pipeline = legs.slack.ok ? "Slack summary sent" : (legs.slack.detail || "Logged (Slack summary not sent)");
   return {
-    ...posted,
-    pipeline: slackOk ? "Slack summary sent" : "Logged (Slack summary not sent)",
-    pipelineOk: slackOk,
+    ok: true,
+    count: 1,
+    pipeline,
+    pipelineOk: legs.slack.ok,
+    quotie_result: legs.quotie.ran ? { ok: legs.quotie.ok, detail: legs.quotie.detail } : undefined,
   };
 }
 
@@ -611,32 +836,53 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
         visitRes = { ok: false, detail: res.error };
       }
     } else if (action.type === "site_visit") {
-      const res = await createQuotieSiteVisit(quotieConfig, {
-        date: input.quotie.date || input.occurred_on,
-        time: input.quotie.time,
-        contact_name: quotieContactName,
-        ghl_contact_id: quotieGhlContactId,
-        address: input.quotie.address,
+      // EOD-3 "Book Site Visit": route through the shared booking handler so
+      // this path does everything the pending-banner path does — previously it
+      // ONLY pushed the Quotie visit (no site_visit_booked activity, no Slack,
+      // no pending pre-resolve). The outer eod_update activity was already
+      // logged above; this leg ADDS the site_visit_booked activity + Slack, and
+      // pre-resolves any matching pending row so the booking can't resurface in
+      // the banner (closes the double-handling loop).
+      const svAppointmentAt =
+        input.quotie.date
+          ? `${input.quotie.date}${input.quotie.time ? `T${input.quotie.time}` : ""}`
+          : input.quotie.time
+            ? `${input.occurred_on}T${input.quotie.time}`
+            : "";
+      const legs = await handleSiteVisitBooked(supabase, {
+        companyId: company.id,
+        companyName: company.name,
         salesPersonName,
-        assign_to: action.assign_to,
-        create_ghl_appointment: input.quotie.create_ghl_appointment ?? true,
-        rough_job_value: input.quotie.rough_job_value,
-        ideal_start: input.quotie.ideal_start,
-        details: input.quotie.details,
-        ghl_assigned_user_id: input.quotie.ghl_assigned_user_id,
+        occurredOn: input.quotie.date || input.occurred_on,
+        contactName: quotieContactName,
+        contactId: quotieGhlContactId,
+        contactAddress: input.quotie.address,
+        appointmentAt: svAppointmentAt,
+        vertical: "roofing",
+        roughJobValue: input.quotie.rough_job_value,
+        idealStartDate: input.quotie.ideal_start,
+        detailsComment: input.quotie.details,
+        // EOD-3 path now ALSO logs the site_visit_booked activity + Slack.
+        logActivity: true,
+        sendSlack: true,
+        createQuotie: true,
+        quotieConfig,
+        // EOD-3 books a NEW visit — honour the form's create-appointment toggle.
+        ghlAppointmentId: undefined,
+        createGhlAppointment: input.quotie.create_ghl_appointment ?? true,
+        quotieAssignTo: action.assign_to,
+        quotieGhlAssignedUserId: input.quotie.ghl_assigned_user_id,
+        quotieTime: input.quotie.time,
+        resolvePending: true,
       });
-      if (res.ok) {
-        const parts: string[] = [];
-        // Prepend GHL appointment assignee when the appointment was created.
-        if (res.ghl?.status === "created") {
-          const assignee = res.ghl.assigned_user_name || res.ghl.assigned_user_id;
-          if (assignee) parts.push(`GHL appt → ${assignee}`);
-        }
-        if (res.warnings?.length) parts.push(res.warnings.join("; "));
-        visitRes = { ok: true, detail: parts.join("; ") || undefined };
-      } else {
-        visitRes = { ok: false, detail: res.error };
-      }
+      const parts: string[] = [];
+      if (legs.quotie.detail) parts.push(legs.quotie.detail);
+      if (!legs.activity.ok && legs.activity.detail) parts.push(`log: ${legs.activity.detail}`);
+      if (!legs.slack.ok && legs.slack.detail) parts.push(legs.slack.detail);
+      visitRes = {
+        ok: legs.quotie.ran ? legs.quotie.ok : legs.activity.ok,
+        detail: parts.join("; ") || undefined,
+      };
     } else {
       // Legacy: an old client sent quotie.type === 'task' (new clients send
       // quotie_task instead). Keep it working across a deploy boundary.
