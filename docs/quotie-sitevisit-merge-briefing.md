@@ -32,7 +32,7 @@ A failure in any leg never fails the others or the EOD submit (your existing nev
 
 | Path | a. Activity | b. Slack | c. Quotie | d. Pending |
 |---|---|---|---|---|
-| **Pending banner** | ✅ (unchanged) | ✅ (unchanged) | ✅ **NEW** — links, does not create a duplicate GHL appointment (see gap below) | ✅ by known `pending_id` (unchanged) |
+| **Pending banner** | ✅ (unchanged) | ✅ (unchanged) | ✅ **NEW** — **links** to the existing GHL appointment (id from `raw_payload`), never creates a duplicate | ✅ by known `pending_id` (unchanged) |
 | **EOD-3 "Book Site Visit"** | ✅ **NEW** | ✅ **NEW** | ✅ (unchanged) — creates the GHL appointment per the form toggle | ✅ **NEW** — pre-resolves by contact + appointment time |
 | **Quotie UI** (via new ingest route) | ✅ (source `'quotie'`) | ✅ | n/a (origin) | n/a |
 
@@ -80,6 +80,12 @@ Response on success: `200 {"status":"logged","type":"site-visit","source":"quoti
 - **Pending-banner bookings now reach Quotie** (previously they only logged + Slacked locally).
 - **Quotie-UI bookings now reach the tracker + Slack** via the new route.
 
+## ⚠️ Reporting change — expect site-visit counts to rise
+
+**EOD-3 "Book Site Visit" submissions now produce BOTH an `eod_update` and a `site_visit_booked` activity.** Previously an EOD-3 booking only wrote the `eod_update`, so those bookings were **invisible in `site_visit_booked` reporting** — the site-visit numbers in reports/sheets were an *undercount*. After this change, site-visit counts in reports/sheets will **rise** to reflect bookings that were previously uncounted.
+
+This is not double-counting: the **pending pre-resolution** built into this branch prevents the same *physical* booking from being counted twice when it also arrives via the GHL calendar webhook path — that pending row is resolved (not re-logged) once the EOD-3 booking is handled. The rise is real, previously-missing volume, not inflation.
+
 ## Secrets
 
 **Your side: nothing new.** The new ingest route reuses the existing `WEBHOOK_SECRET`. It uses one *optional* env, `NODE_SERVICE_URL` (the Railway base) to forward the Slack summary — if it's already set for other reasons the summary works; if it's unset the route still logs the activity and just skips Slack. (Set it on the `ingest` function only if you want Quotie-UI bookings to Slack.)
@@ -93,7 +99,7 @@ Response on success: `200 {"status":"logged","type":"site-visit","source":"quoti
 
 Quotie's notifier POSTs to `EOD_INGEST_URL/webhook/quotie/site-visit` with `Authorization: Bearer <EOD_INGEST_WEBHOOK_SECRET>`. (On Quotie dev, `EOD_INGEST_URL` is intentionally left unset so it's a no-op there.)
 
-The `ghl_appointment_id` parameter on `createQuotieSiteVisit` is **live on Quotie dev and deploying to Quotie prod** — it lets a caller link an existing GHL appointment instead of creating a new one. This branch uses it for the pending-banner path's intent (link, don't duplicate).
+The `ghl_appointment_id` parameter on `createQuotieSiteVisit` is **live on Quotie dev and deploying to Quotie prod** — it lets a caller link an existing GHL appointment instead of creating a new one. This branch uses it on the pending-banner path (link, don't duplicate — see "Linking the GHL appointment" below).
 
 ## Deliberately NOT in this branch (Workstream D)
 
@@ -105,11 +111,19 @@ Merging the *two EOD-logger UIs* into one is parked. When it lands it will add a
 
 The shared `handleSiteVisitBooked` already takes an explicit `sendSlack` toggle, so Workstream D only needs to wire that checkbox to it.
 
-## The one gap to note
+## Linking the GHL appointment (pending-banner path)
 
-**No GHL appointment id is captured from the GHL calendar webhook.** The `/webhook/ghl/site-visit` handler in `src/server.js` stores the whole body as `pending_site_visits.raw_payload`, but nothing extracts an appointment id from it (there's no dedicated column and no confirmed field). So the pending-banner path can't pass a real `ghl_appointment_id` to Quotie.
+A pending booking already exists as a GHL appointment (the calendar webhook created it), so the pending-banner path **links** to it in Quotie rather than creating a duplicate. The `/webhook/ghl/site-visit` handler in `src/server.js` already stores the whole calendar webhook body as `pending_site_visits.raw_payload`, and the GHL appointment id lives inside it — **no webhook or schema change is needed, and this works for existing pending rows too.**
 
-Rather than create a **duplicate** GHL appointment for a booking that already exists in GHL, the pending path calls Quotie with `create_ghl_appointment: false` and no appointment id — Quotie records the visit without touching GHL. If you want true linking later, capture the appointment id in the calendar webhook into `pending_site_visits` (new column) and this branch will thread it straight through.
+Contract (the extractor is null-safe and falls back in order):
+
+```
+raw_payload.calendar.appointmentId        // primary — e.g. "ti0PKiP7l8iA4y16NOFm"
+raw_payload["Appointment ID - Automated"] // fallback custom-field key
+→ undefined                               // neither present
+```
+
+The pending path extracts that id from the pending row and passes it to Quotie as `ghl_appointment_id`, always with `create_ghl_appointment: false`. If neither field is present, Quotie simply records the visit without linking (still no duplicate appointment).
 
 ## Deploy checklist
 

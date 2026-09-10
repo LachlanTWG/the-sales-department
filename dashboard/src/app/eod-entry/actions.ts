@@ -118,6 +118,28 @@ function toMachineAppointmentAt(
   return "";
 }
 
+/**
+ * Extract the GHL appointment id from a pending_site_visits.raw_payload.
+ * The GHL calendar webhook stores the appointment id at
+ * raw_payload.calendar.appointmentId (e.g. 'ti0PKiP7l8iA4y16NOFm'), with a
+ * fallback custom-field key 'Appointment ID - Automated'. Null-safe; returns
+ * undefined when neither is present. Works for existing pending rows too — no
+ * webhook or schema change needed.
+ */
+function ghlAppointmentIdFromRawPayload(rawPayload: unknown): string | undefined {
+  if (!rawPayload || typeof rawPayload !== "object") return undefined;
+  const p = rawPayload as Record<string, unknown>;
+  const calendar = p.calendar;
+  const fromCalendar =
+    calendar && typeof calendar === "object"
+      ? (calendar as Record<string, unknown>).appointmentId
+      : undefined;
+  const fromField = p["Appointment ID - Automated"];
+  const id = (fromCalendar ?? fromField);
+  const s = typeof id === "string" ? id.trim() : id != null ? String(id).trim() : "";
+  return s || undefined;
+}
+
 /** api-callbacks callback_reason line for the lead's attempt history. */
 function callbackReasonFor(outcome: string, stdOutcome: string): string {
   switch (outcome) {
@@ -503,6 +525,21 @@ export async function completePendingSiteVisit(
     return { ok: false, error: "Contact name is required" };
   }
 
+  // Pull the GHL appointment id off the pending row's stored calendar webhook
+  // body so Quotie LINKS to the existing appointment instead of creating a
+  // duplicate. Best-effort — a lookup miss just means Quotie records the visit
+  // without linking (still create_ghl_appointment: false below).
+  let ghlAppointmentId: string | undefined;
+  {
+    const { data: pendingRow } = await supabase
+      .from("pending_site_visits")
+      .select("raw_payload")
+      .eq("id", input.pending_id.trim())
+      .eq("company_id", company.id)
+      .maybeSingle();
+    ghlAppointmentId = ghlAppointmentIdFromRawPayload(pendingRow?.raw_payload);
+  }
+
   const legs = await handleSiteVisitBooked(supabase, {
     companyId: company.id,
     companyName: company.name,
@@ -524,14 +561,13 @@ export async function completePendingSiteVisit(
     previousQuotes: input.previous_quotes,
     // Pending-banner path: log activity + Slack (as before) AND now also push
     // to Quotie. The booking already exists in GHL (calendar-originated), so we
-    // do NOT create a duplicate GHL appointment. No appointment id is captured
-    // from the GHL calendar webhook (raw_payload gap — see briefing), so Quotie
-    // records the visit without linking to the appointment.
+    // pass its appointment id (from raw_payload.calendar.appointmentId) for
+    // Quotie to LINK to, and NEVER create a duplicate GHL appointment.
     logActivity: true,
     sendSlack: true,
     createQuotie: true,
     quotieConfig: company.quotie_config as QuotieConfig | null | undefined,
-    ghlAppointmentId: undefined,
+    ghlAppointmentId,
     createGhlAppointment: false,
     resolvePending: true,
     pendingId: input.pending_id.trim(),
