@@ -156,7 +156,7 @@ export default async function ReportsPage({
             ? report.people
             : report.people.filter(p => p.name === viewer.salesPersonName);
           const cards = [
-            ...(canSeeTeam ? [report.team] : []),
+            ...(canSeeTeam && report.team ? [report.team] : []),
             ...people,
           ];
           const anyActivity = cards.some(c => c.hasActivity);

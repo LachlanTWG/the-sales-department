@@ -1528,7 +1528,7 @@ export type DashboardMessages = {
   perCompany: {
     company: CompanyRow;
     personal: LiveMessage | null;     // null when viewer not on roster
-    team: LiveMessage;
+    team: LiveMessage | null;         // null when the book has ≤1 active exec
   }[];
   personalTotal: LiveMessage | null;   // null when viewer on ≤ 1 company
   grandTotal: LiveMessage | null;      // null when ≤ 1 visible company
@@ -1597,6 +1597,17 @@ export async function loadDashboardMessages(
   );
 
   const ids = companies.map(c => c.id);
+  const { data: rosterRows } = ids.length === 0
+    ? { data: [] as { company_id: string }[] }
+    : await supabase
+        .from("sales_people")
+        .select("company_id")
+        .in("company_id", ids)
+        .eq("active", true);
+  const rosterCount = new Map<string, number>();
+  for (const r of rosterRows || []) {
+    rosterCount.set(r.company_id, (rosterCount.get(r.company_id) || 0) + 1);
+  }
   // Pull a lookback window so "I RQ'd Friday, Max quoted Monday" still pairs
   // on the Monday card. Counts stay clipped to [rangeStart, rangeEnd].
   const pairStart = addDaysIso(rangeStart, -HANDOFF_LOOKBACK_DAYS);
@@ -1630,9 +1641,11 @@ export async function loadDashboardMessages(
     const all = pairing.filter(inPeriod);
     const ownerName = ownerByCompany.get(c.id) || "Owner";
 
-    // Team: all activities for this company. countOutcomes treats it the same.
-    const teamData = countOutcomes(all, ownerName, pairing, rangeOpts);
-    const teamMessage = buildMessage({
+    // Team: all activities for this company. Skip on a one-person roster —
+    // the Team card would just duplicate their personal report.
+    const soloRoster = (rosterCount.get(c.id) || 0) <= 1;
+    const teamData = soloRoster ? null : countOutcomes(all, ownerName, pairing, rangeOpts);
+    const teamMessage = teamData ? buildMessage({
       period,
       companyLabel: c.name,
       personLabel: "Team",
@@ -1641,7 +1654,7 @@ export async function loadDashboardMessages(
       rangeStart, rangeEnd,
       data: teamData,
       monthlyBreakdown: breakdownFor(all, ownerName, pairing),
-    });
+    }) : null;
 
     let personal: LiveMessage | null = null;
     if (opts.myCompanyIds.has(c.id)) {
@@ -1668,7 +1681,9 @@ export async function loadDashboardMessages(
     return {
       company: c,
       personal,
-      team: { scope: "team", title: c.name, subtitle: "Team", message: teamMessage },
+      team: teamMessage
+        ? { scope: "team", title: c.name, subtitle: "Team", message: teamMessage }
+        : null,
     };
   });
 
@@ -1734,7 +1749,7 @@ export type CompanyLiveReport = {
   format: ReportFormat;
   rangeStart: string;
   rangeEnd: string;
-  team: { name: string; message: string; hasActivity: boolean };
+  team: { name: string; message: string; hasActivity: boolean } | null;
   people: { name: string; message: string; hasActivity: boolean }[];
 };
 
@@ -1799,7 +1814,6 @@ export async function loadCompanyLiveReports(
     return { message, hasActivity };
   };
 
-  const team = { name: "Team", ...mkReport(inRange, "Team", "team") };
   const people = (roster || []).map(p => {
     const rows = inRange.filter(r =>
       r.sales_person_id === p.id ||
@@ -1813,7 +1827,7 @@ export async function loadCompanyLiveReports(
     format: opts.format,
     rangeStart: start,
     rangeEnd: end,
-    team,
+    team: (roster || []).length <= 1 ? null : { name: "Team", ...mkReport(inRange, "Team", "team") },
     people,
   };
 }

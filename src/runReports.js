@@ -81,9 +81,14 @@ function buildPeopleData(activityData, activePeople, inPeriod, ownerName, compan
 /**
  * Post the period's Team output to ClickUp as TWO messages: a people
  * side-by-side summary table first, then the detailed Team report. No-op if
- * nobody had any activity in the period.
+ * nobody had any activity in the period, or if the book is a one-person
+ * roster (the Team message would just duplicate their personal report).
  */
 async function sendTeamToClickUp(company, type, periodLabel, teamMessage, peopleData, ownerName) {
+  if (peopleData.length <= 1) {
+    console.log(`  ClickUp: Team ${type.toUpperCase()} skipped (solo roster).`);
+    return;
+  }
   const anyActivity = peopleData.some(p => Object.values(p.data.counts || {}).some(v => v > 0));
   if (!anyActivity) return;
   const TYPE = type.toUpperCase();
@@ -151,8 +156,10 @@ async function sendCompanyEOD(company, targetDate) {
     }
   }
 
-  // Skip team report if only 1 of 2 people had activity (would just duplicate their report)
-  const skipTeam = activePeople.length === 2 && peopleWithActivity <= 1;
+  // Skip team report when it would just duplicate a personal report:
+  // one-person roster, or only 1 of 2 people had activity today.
+  const soloRoster = activePeople.length <= 1;
+  const skipTeam = soloRoster || (activePeople.length === 2 && peopleWithActivity <= 1);
 
   // Team daily — summarised report to Slack
   try {
@@ -160,7 +167,10 @@ async function sendCompanyEOD(company, targetDate) {
       company.sheetId, 'Team', date, company.name, company.ownerName, activityData
     );
     if (skipTeam) {
-      console.log(`  Team: Skipped Slack (only ${peopleWithActivity}/2 had activity).`);
+      const why = soloRoster
+        ? 'solo roster'
+        : `only ${peopleWithActivity}/2 had activity`;
+      console.log(`  Team: Skipped Slack (${why}).`);
     } else {
       await sendReportToSlack(company, 'eod', message).catch(e =>
         console.error(`  Slack error (Team): ${e.message}`)
@@ -172,7 +182,7 @@ async function sendCompanyEOD(company, targetDate) {
   }
 
   // ClickUp — send one summary table with all people + team totals
-  if (peopleData.length > 0 && peopleWithActivity > 0) {
+  if (peopleData.length > 0 && peopleWithActivity > 0 && !soloRoster) {
     try {
       const summary = buildEODSummaryTable(company.name, date, company.ownerName, peopleData);
       const title = `EOD Summary - ${date}`;

@@ -50,7 +50,7 @@ export async function LiveMessagesPanel({
   const onRoster = messages.perCompany.filter(c => targetCompanyIds.has(c.company.id)).sort(byName);
   const offRoster = messages.perCompany.filter(c => !targetCompanyIds.has(c.company.id)).sort(byName);
   const ordered = [...onRoster, ...offRoster];
-  const teamOrdered = [...messages.perCompany].sort(byName);
+  const teamOrdered = [...messages.perCompany].filter(c => c.team).sort(byName);
 
   return (
     <>
@@ -84,7 +84,7 @@ export async function LiveMessagesPanel({
         </section>
       )}
 
-      {isAdmin && (
+      {isAdmin && (teamOrdered.length > 0 || messages.grandTotal) && (
         <section className="mt-8">
           <SectionHeader
             title="Team"
