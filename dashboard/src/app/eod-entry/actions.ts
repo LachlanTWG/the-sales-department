@@ -34,7 +34,7 @@ import {
   type QuotieConfig,
   type QuotieTeamMember,
 } from "./quotie";
-import { fetchPreviousQuotes, type PreviousQuote } from "./data";
+import { fetchGhlContact, fetchPreviousQuotes, type PreviousQuote } from "./data";
 
 export type EodEntryInput = {
   token: string;
@@ -880,6 +880,17 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
           : input.quotie.time
             ? `${input.occurred_on}T${input.quotie.time}`
             : "";
+      // The EOD-3 form never collects phone/email — enrich from the GHL
+      // contact (request-cached GET) so the Slack summary isn't blank.
+      // Best-effort: a miss just means the fields stay empty; Quotie backfills
+      // its own copy server-side from ghl_contact_id regardless.
+      let svGhlContact = { phone: "", email: "", address: "" };
+      if (quotieGhlContactId && locationId) {
+        try {
+          const c = await fetchGhlContact(locationId, quotieGhlContactId);
+          svGhlContact = { phone: c.phone, email: c.email, address: c.address };
+        } catch { /* enrichment only — never blocks the booking */ }
+      }
       const legs = await handleSiteVisitBooked(supabase, {
         companyId: company.id,
         companyName: company.name,
@@ -887,7 +898,9 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
         occurredOn: input.quotie.date || input.occurred_on,
         contactName: quotieContactName,
         contactId: quotieGhlContactId,
-        contactAddress: input.quotie.address,
+        contactPhone: svGhlContact.phone || undefined,
+        contactEmail: svGhlContact.email || undefined,
+        contactAddress: input.quotie.address || svGhlContact.address || undefined,
         appointmentAt: svAppointmentAt,
         vertical: "roofing",
         roughJobValue: input.quotie.rough_job_value,
