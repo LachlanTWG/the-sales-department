@@ -25,6 +25,7 @@ import {
   type EodEntryInput,
 } from "./actions";
 import type { QuotieTeamMember } from "./quotie";
+import { SiteVisitSection } from "./SiteVisitSection";
 
 // Site visits are logged via the pending calendar banner (not this Type selector).
 const EVENT_TYPES = [
@@ -204,6 +205,8 @@ export function EodEntryForm({
   const [svRough, setSvRough] = useState("");
   const [svIdealStart, setSvIdealStart] = useState("");
   const [svComment, setSvComment] = useState("");
+  // Send-Slack checkbox for the pending-banner path — default true on every open.
+  const [svSendSlack, setSvSendSlack] = useState(true);
   /** Two-step delete: first click shows Confirm on the Delete slot. */
   const [confirmDeletePending, setConfirmDeletePending] = useState(false);
   const [quotesLoading, setQuotesLoading] = useState(false);
@@ -329,6 +332,8 @@ export function EodEntryForm({
   const [qsvRough, setQsvRough] = useState("");
   const [qsvIdealStart, setQsvIdealStart] = useState("");
   const [qsvDetails, setQsvDetails] = useState("");
+  // Send-Slack checkbox for the EOD-3 path — default true on every open.
+  const [qsvSendSlack, setQsvSendSlack] = useState(true);
   // Team member picker — null means not yet fetched; [] means fetched but empty (hide picker).
   const [qsvTeam, setQsvTeam] = useState("");
   const [qsvTeamTouched, setQsvTeamTouched] = useState(false);
@@ -424,6 +429,7 @@ export function EodEntryForm({
     setSvRough(""); // always manual — never prefill
     setSvIdealStart("");
     setSvComment("");
+    setSvSendSlack(true); // reset to checked on every open — no sticky memory
     setConfirmDeletePending(false);
     setError(null);
     setSavedCount(null);
@@ -458,6 +464,7 @@ export function EodEntryForm({
     setSvRough("");
     setSvIdealStart("");
     setSvComment("");
+    setSvSendSlack(true);
     setConfirmDeletePending(false);
     setQuotesLoading(false);
   }
@@ -505,6 +512,7 @@ export function EodEntryForm({
         details_comment: svComment,
         previous_quotes: activePending.previousQuotes,
         visit_kind: activePending.visitKind,
+        send_slack: svSendSlack,
       });
       if (!res.ok) { setError(res.error); return; }
       setSavedCount(res.count);
@@ -568,6 +576,7 @@ export function EodEntryForm({
         ideal_start: qsvIdealStart.trim() || undefined,
         details: qsvDetails.trim() || undefined,
         ghl_assigned_user_id: qsvTeam || undefined,
+        send_slack: qsvSendSlack,
       };
     } else if (evType === "eod_update" && eod3Callback && qtaskEnabled) {
       // The sticky-bar checkbox doubles as "Add to Quotie pipeline" here. The
@@ -749,93 +758,23 @@ export function EodEntryForm({
               />
             </div>
 
-            <Field label="Sales person">
-              <select value={salesPerson} onChange={e => chooseSalesPerson(e.target.value)} className={inputClass}>
-                {people.map(p => <option key={p} value={p}>{p}</option>)}
-                {salesPerson && !people.includes(salesPerson) && (
-                  <option value={salesPerson}>{salesPerson}</option>
-                )}
-                <option value="">— team —</option>
-              </select>
-            </Field>
-
-            {/* Previous quotes — always shown (roofing + solar) */}
-            <div className="rounded border border-zinc-800 bg-zinc-950/40 px-3 py-2">
-              <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
-                Previous quotes
-              </div>
-              {quotesLoading && activePending.previousQuotes.length === 0 ? (
-                <p className="mt-1 text-[12px] text-zinc-500">
-                  Loading previous quotes…
-                </p>
-              ) : activePending.previousQuotes.length === 0 ? (
-                <p className="mt-1 text-[12px] text-zinc-500">
-                  No previous quote has been sent.
-                </p>
-              ) : (
-                <ul className="mt-1.5 space-y-1">
-                  {activePending.previousQuotes.map((q, i) => (
-                    <li key={i} className="text-[12px] text-zinc-300">
-                      {q.number ? (
-                        <span className="text-zinc-400">#{q.number} · </span>
-                      ) : null}
-                      ${String(q.value).replace(/[$,]/g, "")}
-                      {q.date ? ` · ${formatAuNzDate(q.date) || q.date}` : ""}
-                      {q.person ? ` · ${q.person}` : ""}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            {activePending.vertical === "roofing" ? (
-              <>
-                <Field label="Rough job value (incl. GST)" hint="Required — dollars, no symbols.">
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    required
-                    value={svRough}
-                    onChange={e => setSvRough(e.target.value)}
-                    className={inputClass}
-                    placeholder="e.g. 12000"
-                  />
-                </Field>
-                <Field label="Ideal start date">
-                  <select
-                    value={svIdealStart}
-                    onChange={e => setSvIdealStart(e.target.value)}
-                    className={inputClass}
-                  >
-                    <option value="">— select —</option>
-                    <option value="ASAP">ASAP</option>
-                    <option value="0-30 days">0-30 days</option>
-                    <option value="30-90 days">30-90 days</option>
-                    <option value="90 days+">90 days+</option>
-                    <option value="Not sure">Not sure</option>
-                  </select>
-                </Field>
-                <Field label="Details / comment" hint="Single line.">
-                  <input
-                    type="text"
-                    value={svComment}
-                    onChange={e => setSvComment(e.target.value)}
-                    className={inputClass}
-                    placeholder="Anything the crew should know"
-                  />
-                </Field>
-              </>
-            ) : (
-              <Field label="Comment" hint="Optional — notes for the Slack summary.">
-                <input
-                  type="text"
-                  value={svComment}
-                  onChange={e => setSvComment(e.target.value)}
-                  className={inputClass}
-                  placeholder="Anything worth noting"
-                />
-              </Field>
-            )}
+            <SiteVisitSection
+              vertical={activePending.vertical}
+              rough={svRough}
+              onRoughChange={setSvRough}
+              roughRequired={activePending.vertical === "roofing"}
+              idealStart={svIdealStart}
+              onIdealStartChange={setSvIdealStart}
+              comment={svComment}
+              onCommentChange={setSvComment}
+              sendSlack={svSendSlack}
+              onSendSlackChange={setSvSendSlack}
+              previousQuotes={activePending.previousQuotes}
+              quotesLoading={quotesLoading}
+              salesPerson={salesPerson}
+              people={people}
+              onSalesPersonChange={chooseSalesPerson}
+            />
 
             {error && (
               <div className="rounded border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">
@@ -857,9 +796,13 @@ export function EodEntryForm({
               >
                 {pending && !confirmDeletePending
                   ? "Sending…"
-                  : activePending.visitKind === "virtual"
-                    ? "Log virtual visit → Slack"
-                    : "Log site visit → Slack"}
+                  : svSendSlack
+                    ? activePending.visitKind === "virtual"
+                      ? "Log virtual visit → Slack"
+                      : "Log site visit → Slack"
+                    : activePending.visitKind === "virtual"
+                      ? "Log virtual visit"
+                      : "Log site visit"}
               </button>
               <button
                 type="button"
@@ -990,92 +933,72 @@ export function EodEntryForm({
                     />
                   </label>
                   {qsvEnabled && (
-                    <>
-                      <div className="grid grid-cols-2 gap-3">
-                        <Field label="Date">
-                          <input
-                            type="date"
-                            value={qsvDate}
-                            onChange={e => setQsvDate(e.target.value)}
-                            className={inputClass}
-                          />
-                        </Field>
-                        <Field label="Time" hint="Optional.">
-                          <input
-                            type="time"
-                            value={qsvTime}
-                            onChange={e => setQsvTime(e.target.value)}
-                            className={inputClass}
-                          />
-                        </Field>
-                      </div>
-                      <Field label="Address" hint="Prefilled from the contact — edit if needed.">
-                        <input
-                          type="text"
-                          value={qsvAddress}
-                          onChange={e => setQsvAddress(e.target.value)}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field label="Rough job value" hint="Optional — dollars, no symbols.">
-                        <input
-                          type="text"
-                          inputMode="decimal"
-                          value={qsvRough}
-                          onChange={e => setQsvRough(e.target.value)}
-                          className={inputClass}
-                          placeholder="e.g. 12000"
-                        />
-                      </Field>
-                      <Field label="Ideal start date">
-                        <select
-                          value={qsvIdealStart}
-                          onChange={e => setQsvIdealStart(e.target.value)}
-                          className={inputClass}
-                        >
-                          <option value="">— select —</option>
-                          <option value="ASAP">ASAP</option>
-                          <option value="0-30 days">0-30 days</option>
-                          <option value="30-90 days">30-90 days</option>
-                          <option value="90 days+">90 days+</option>
-                          <option value="Not sure">Not sure</option>
-                        </select>
-                      </Field>
-                      <Field label="Details" hint="Optional.">
-                        <textarea
-                          value={qsvDetails}
-                          onChange={e => setQsvDetails(e.target.value)}
-                          rows={2}
-                          className={inputClass}
-                          placeholder="Anything discussed on the call — access, scope, expectations…"
-                        />
-                      </Field>
-                      {qsvTeamMembers !== null && qsvTeamMembers.length > 0 && (
-                        <Field label="Team member" hint="Who the GHL appointment is assigned to.">
-                          <select
-                            value={qsvTeam}
-                            onChange={e => { setQsvTeam(e.target.value); setQsvTeamTouched(true); }}
-                            className={inputClass}
-                          >
-                            <option value="">Calendar default</option>
-                            {qsvTeamMembers.map(m => (
-                              <option key={m.id} value={m.id}>
-                                {m.name ?? m.id}{m.is_primary ? " · primary" : ""}
-                              </option>
-                            ))}
-                          </select>
-                        </Field>
-                      )}
-                      <label className="flex items-start gap-2 text-xs text-zinc-300">
-                        <input
-                          type="checkbox"
-                          checked={qsvGhlAppt}
-                          onChange={e => setQsvGhlAppt(e.target.checked)}
-                          className="mt-0.5 rounded border-zinc-600 bg-zinc-900"
-                        />
-                        <span className="font-medium text-zinc-200">Also create GHL calendar appointment</span>
-                      </label>
-                    </>
+                    <SiteVisitSection
+                      vertical="roofing"
+                      rough={qsvRough}
+                      onRoughChange={setQsvRough}
+                      idealStart={qsvIdealStart}
+                      onIdealStartChange={setQsvIdealStart}
+                      comment={qsvDetails}
+                      onCommentChange={setQsvDetails}
+                      sendSlack={qsvSendSlack}
+                      onSendSlackChange={setQsvSendSlack}
+                      extraFields={
+                        <>
+                          <div className="grid grid-cols-2 gap-3">
+                            <Field label="Date">
+                              <input
+                                type="date"
+                                value={qsvDate}
+                                onChange={e => setQsvDate(e.target.value)}
+                                className={inputClass}
+                              />
+                            </Field>
+                            <Field label="Time" hint="Optional.">
+                              <input
+                                type="time"
+                                value={qsvTime}
+                                onChange={e => setQsvTime(e.target.value)}
+                                className={inputClass}
+                              />
+                            </Field>
+                          </div>
+                          <Field label="Address" hint="Prefilled from the contact — edit if needed.">
+                            <input
+                              type="text"
+                              value={qsvAddress}
+                              onChange={e => setQsvAddress(e.target.value)}
+                              className={inputClass}
+                            />
+                          </Field>
+                          {qsvTeamMembers !== null && qsvTeamMembers.length > 0 && (
+                            <Field label="Team member" hint="Who the GHL appointment is assigned to.">
+                              <select
+                                value={qsvTeam}
+                                onChange={e => { setQsvTeam(e.target.value); setQsvTeamTouched(true); }}
+                                className={inputClass}
+                              >
+                                <option value="">Calendar default</option>
+                                {qsvTeamMembers.map(m => (
+                                  <option key={m.id} value={m.id}>
+                                    {m.name ?? m.id}{m.is_primary ? " · primary" : ""}
+                                  </option>
+                                ))}
+                              </select>
+                            </Field>
+                          )}
+                          <label className="flex items-start gap-2 text-xs text-zinc-300">
+                            <input
+                              type="checkbox"
+                              checked={qsvGhlAppt}
+                              onChange={e => setQsvGhlAppt(e.target.checked)}
+                              className="mt-0.5 rounded border-zinc-600 bg-zinc-900"
+                            />
+                            <span className="font-medium text-zinc-200">Also create GHL calendar appointment</span>
+                          </label>
+                        </>
+                      }
+                    />
                   )}
                 </div>
               )}
