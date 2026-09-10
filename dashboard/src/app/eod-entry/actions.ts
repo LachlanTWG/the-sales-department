@@ -526,19 +526,10 @@ export async function completePendingSiteVisit(
   }
 
   // Pull the GHL appointment id off the pending row's stored calendar webhook
-  // body so Quotie LINKS to the existing appointment instead of creating a
-  // duplicate. Best-effort — a lookup miss just means Quotie records the visit
-  // without linking (still create_ghl_appointment: false below).
-  let ghlAppointmentId: string | undefined;
-  {
-    const { data: pendingRow } = await supabase
-      .from("pending_site_visits")
-      .select("raw_payload")
-      .eq("id", input.pending_id.trim())
-      .eq("company_id", company.id)
-      .maybeSingle();
-    ghlAppointmentId = ghlAppointmentIdFromRawPayload(pendingRow?.raw_payload);
-  }
+  // body (fetched above) so Quotie LINKS to the existing appointment instead
+  // of creating a duplicate. Best-effort — a lookup miss just means Quotie
+  // records the visit without linking (still create_ghl_appointment: false).
+  const ghlAppointmentId = ghlAppointmentIdFromRawPayload(pendingRow?.raw_payload);
 
   const legs = await handleSiteVisitBooked(supabase, {
     companyId: company.id,
