@@ -69,6 +69,8 @@ export type EodEntryInput = {
     ideal_start?: string;
     details?: string;
     ghl_assigned_user_id?: string;
+    /** Gate the Slack-summary leg for site-visit bookings. Activity + Quotie always run. Defaults true. */
+    send_slack?: boolean;
   };
   /**
    * Independent Quotie task — fires for any eod_update regardless of outcome
@@ -191,6 +193,8 @@ export type CompleteSiteVisitInput = {
   details_comment?: string;
   previous_quotes?: { date: string; value: string; person: string; number?: string }[];
   visit_kind?: "in_person" | "virtual";
+  /** Gate the Slack-summary leg only. Activity log + Quotie always run. Defaults true. */
+  send_slack?: boolean;
 };
 
 /**
@@ -555,7 +559,7 @@ export async function completePendingSiteVisit(
     // pass its appointment id (from raw_payload.calendar.appointmentId) for
     // Quotie to LINK to, and NEVER create a duplicate GHL appointment.
     logActivity: true,
-    sendSlack: true,
+    sendSlack: input.send_slack !== false, // default true; checkbox gates this leg only
     createQuotie: true,
     quotieConfig: company.quotie_config as QuotieConfig | null | undefined,
     ghlAppointmentId,
@@ -891,7 +895,7 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
         detailsComment: input.quotie.details,
         // EOD-3 path now ALSO logs the site_visit_booked activity + Slack.
         logActivity: true,
-        sendSlack: true,
+        sendSlack: input.quotie.send_slack !== false, // default true; checkbox gates this leg only
         createQuotie: true,
         quotieConfig,
         // EOD-3 books a NEW visit — honour the form's create-appointment toggle.
