@@ -144,7 +144,12 @@ async function getEodPipeline(locationId: string, token: string): Promise<Pipeli
   if (cached) return cached;
 
   const res = await fetch(`${GHL_BASE}/opportunities/pipelines?locationId=${locationId}`, {
-    headers: { Authorization: `Bearer ${token}`, Version: GHL_VERSION },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Version: GHL_VERSION,
+      Accept: "application/json",
+      "User-Agent": "EOD-Creator/1.0 (pipeline)",
+    },
     cache: "no-store",
   });
   if (res.status === 401 || res.status === 403) return "unauthorized";

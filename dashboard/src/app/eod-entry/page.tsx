@@ -78,7 +78,7 @@ export default async function EodEntryPage({
   // team, with the client resolved per page view from the GHL location id in
   // the URL the exec is currently on.
   const supabase = createAdminClient();
-  let query = supabase.from("companies").select("id, name, slug, timezone, active, quotie_config, owner_name");
+  let query = supabase.from("companies").select("id, name, slug, timezone, active, quotie_config, owner_name, ghl_location_id");
   if (slug === "agency") {
     if (!location) return <Notice>Open this from the EOD Logger extension inside GHL.</Notice>;
     query = query.eq("ghl_location_id", location);
@@ -117,13 +117,14 @@ export default async function EodEntryPage({
     const optionsPromise = fetchEodOptions(company.id, company.owner_name);
     const historyPromise = fetchContactHistory(company.id, cId, scraped);
     const people = await peoplePromise;
+    const ghlLocationId = location || (company.ghl_location_id as string) || "";
 
     const [options, history, ghl, pendingVisits] = await Promise.all([
       optionsPromise,
       historyPromise,
-      fetchGhlContact(location || "", cId, people),
+      fetchGhlContact(ghlLocationId, cId, people),
       fetchPendingSiteVisits(company.id, company.name, company.slug, {
-        ghlLocationId: location || "",
+        ghlLocationId,
         timeZone: company.timezone || "Australia/Sydney",
         pageContactId: cId,
         pageContactName: scraped || undefined,
@@ -152,7 +153,7 @@ export default async function EodEntryPage({
     content = (
       <EodEntryForm
         token={token}
-        ghlLocationId={location || ""}
+        ghlLocationId={ghlLocationId}
         companyName={company.name}
         people={people}
         defaultDate={today}
