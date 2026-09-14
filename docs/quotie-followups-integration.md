@@ -17,7 +17,7 @@ So the popup now picks a lane, and the two never cross.
 
 **EOD 1 · Stage drives it.** Stage `Post Quote Follow Up` → post-quote lane. Everything else → pre-quote.
 
-**The exec can flip it.** A two-button Pre-quote / Post-quote toggle sits at the top of the Quotie section (same styling as the EOD 1 stage buttons). It appears only when the chosen outcome actually maps to a Quotie pipeline move — it is meaningless for the plain "also create a task" case. Flipping it overrides the stage for that one submission; changing the stage resets the override, and so does a successful submit.
+**The exec can flip it.** A two-button Pre-quote / Post-quote toggle sits in its own "Quotie lane" row directly under EOD 3 (same styling as the EOD 1 stage buttons). It appears whenever the chosen outcome or EOD 2 answer maps to a Quotie pipeline move in *either* lane — so an exec on the Post Quote stage who picks "Not Ready Yet - Pre-Quote" still sees it, with an amber hint that nothing will be sent in the current lane and they should switch. It is hidden for the plain "also create a task" case. Flipping it overrides the stage for that one submission; changing the stage resets the override, and so does a successful submit.
 
 **The server never trusts the toggle blindly.** `submitEodEntry` re-derives the lane from `eod_fields.stage` whenever the client sends nothing or sends an unrecognised value, and it always re-resolves the action from `quotie_config` — the client's `type` is still only used as a "did the config change under me" cross-check, exactly as before.
 

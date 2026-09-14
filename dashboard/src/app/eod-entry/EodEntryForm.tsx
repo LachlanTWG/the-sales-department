@@ -381,6 +381,14 @@ export function EodEntryForm({
   const eod3FollowUp = quotieKind === "follow_up";
   const eod2Signal = !eod3Callback && !eod3FollowUp && !!activeAnswered[answered];
   const quotieLinked = eod3Callback || eod3FollowUp || eod2Signal;
+  // Does this outcome / answer drive a Quotie pipeline move in the OTHER lane?
+  // Drives the lane toggle's visibility so an exec who picked, say, "Not Ready
+  // Yet - Pre-Quote" while on the Post Quote stage can still flip to Pre-quote.
+  const otherLane: QuotieLane = lane === "post_quote" ? "pre_quote" : "post_quote";
+  const otherKind = quotieClient.actions[otherLane][stdOutcome]?.type;
+  const linkedInOtherLane =
+    otherKind === "callback" || otherKind === "follow_up" || !!quotieClient.answered[otherLane][answered];
+  const showLaneToggle = quotieEnabled && (quotieLinked || linkedInOtherLane);
   // Pre lane: parked outcomes capture a when-to-call-back date.
   const showCallbackDate = eod3Callback && quotieAction?.outcome === "callback_requested";
   const [qcbDate, setQcbDate] = useState("");
@@ -1009,6 +1017,44 @@ export function EodEntryForm({
                 </select>
               </Field>
 
+              {/* Quotie lane — lives outside the checkbox-gated Quotie box so it is
+                  visible whenever the outcome / answer means something to Quotie
+                  in EITHER lane, not just the one EOD 1 pre-selected. */}
+              {showLaneToggle && (
+                <Field
+                  label="Quotie lane"
+                  hint="Pre-fills from EOD 1. Pre-quote → callback pipeline · Post-quote → quote follow-ups."
+                >
+                  <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Quotie lane">
+                    {([
+                      { value: "pre_quote" as const, label: "Pre-quote" },
+                      { value: "post_quote" as const, label: "Post-quote" },
+                    ]).map(l => (
+                      <button
+                        key={l.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={lane === l.value}
+                        onClick={() => setLaneOverride(l.value)}
+                        className={
+                          lane === l.value
+                            ? "rounded border border-sky-600 bg-sky-600/20 px-3 py-2 text-sm font-medium text-sky-300"
+                            : "rounded border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-400 hover:border-zinc-600"
+                        }
+                      >
+                        {l.label}
+                      </button>
+                    ))}
+                  </div>
+                  {!quotieLinked && linkedInOtherLane && (
+                    <p className="mt-1 text-[10px] text-amber-300/90">
+                      Nothing to send to Quotie in the {lane === "post_quote" ? "Post-quote" : "Pre-quote"} lane for this
+                      outcome — switch to {lane === "post_quote" ? "Pre-quote" : "Post-quote"} to update Quotie.
+                    </p>
+                  )}
+                </Field>
+              )}
+
               {quotieKind === "site_visit" && (
                 <div className="space-y-3 rounded-lg border border-sky-900/60 bg-sky-950/20 p-3">
                   <label className="flex items-center justify-between gap-2">
@@ -1225,34 +1271,6 @@ export function EodEntryForm({
                   ? lane === "post_quote" ? "Quotie follow-up" : "Quotie pipeline"
                   : "Quotie task"}
               </span>
-              {quotieLinked && (
-                <div>
-                  <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Quotie lane">
-                    {([
-                      { value: "pre_quote" as const, label: "Pre-quote" },
-                      { value: "post_quote" as const, label: "Post-quote" },
-                    ]).map(l => (
-                      <button
-                        key={l.value}
-                        type="button"
-                        role="radio"
-                        aria-checked={lane === l.value}
-                        onClick={() => setLaneOverride(l.value)}
-                        className={
-                          lane === l.value
-                            ? "rounded border border-sky-600 bg-sky-600/20 px-3 py-2 text-sm font-medium text-sky-300"
-                            : "rounded border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-400 hover:border-zinc-600"
-                        }
-                      >
-                        {l.label}
-                      </button>
-                    ))}
-                  </div>
-                  <p className="mt-1 text-[10px] text-zinc-500">
-                    Pre-fills from EOD 1. Pre-quote → Quotie callback pipeline · Post-quote → quote follow-ups.
-                  </p>
-                </div>
-              )}
               {quotieLinked ? (
                 <>
                   <p className="text-[11px] leading-relaxed text-sky-200/70">
