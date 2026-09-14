@@ -23,7 +23,7 @@ import {
 } from "./data";
 import { MeView, TabBar, TodayView } from "./views";
 import { EodEntryForm } from "./EodEntryForm";
-import { safeAnsweredCallbacks, safeQuotieActions, type QuotieConfig } from "./quotie";
+import { safeQuotieClientConfig, type QuotieConfig } from "./quotie";
 // Force dark even if THEME_BOOT already ran (dashboard cookie is light).
 const EOD_THEME_BOOT = `(function(){try{var r=document.documentElement;r.classList.add("dark");r.style.colorScheme="dark";}catch(e){}})();`;
 
@@ -147,13 +147,13 @@ export default async function EodEntryPage({
     const displaySource = history?.lastSource || history?.topSource || "";
     // Owner from GHL contact assignment → roster match.
     const defaultExec = ghl.ownerName || "";
-    // Safe outcome→type projection for the Quotie action sections. Empty {}
-    // for clients without a configured api_key — zero visual change.
-    const quotieActions = safeQuotieActions(company.quotie_config);
-    // EOD 2 (Answered?) → pipeline callback projection (no_answer / voicemail).
-    const answeredCallbacks = safeAnsweredCallbacks(company.quotie_config);
-    // Feature flag for the always-available task checkbox: quotieActions is
-    // {} both for "no api_key" and "no mapped outcomes", so derive separately.
+    // Safe both-lane projection for the Quotie action sections: outcome maps,
+    // EOD 2 signals and the post-quote stage list, with no api_key / api_url /
+    // user_map. All-empty for clients without a configured api_key — zero
+    // visual change.
+    const quotieClient = safeQuotieClientConfig(company.quotie_config);
+    // Feature flag for the always-available task checkbox: the projection is
+    // empty both for "no api_key" and "no mapped outcomes", so derive separately.
     const quotieEnabled = !!(company.quotie_config as QuotieConfig | null | undefined)?.api_key;
     content = (
       <EodEntryForm
@@ -172,8 +172,7 @@ export default async function EodEntryPage({
         options={options}
         history={history}
         pendingSiteVisits={pendingVisits}
-        quotieActions={quotieActions}
-        answeredCallbacks={answeredCallbacks}
+        quotieClient={quotieClient}
         quotieEnabled={quotieEnabled}
       />
     );
