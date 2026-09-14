@@ -8,6 +8,10 @@
 import { cache } from "react";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isVirtualVisitPayload, type VisitKind } from "@/lib/visitKind";
+import {
+  loggedVisitCoversPending,
+  LOGGED_VISIT_LOOKBACK_MS,
+} from "@/lib/siteVisitMatch";
 
 /** Per-request GHL HTTP budget — a hung LeadConnector call must not stall the popup. */
 const GHL_TIMEOUT_MS = 2000;
@@ -298,6 +302,51 @@ function applyLiveAppointment(pending: PendingSiteVisit, appt: GhlAppointment | 
   if (appt.title && /virtual/i.test(appt.title)) pending.visitKind = "virtual";
 }
 
+async function resolveCoveredPendingSiteVisits(
+  supabase: ReturnType<typeof createAdminClient>,
+  companyId: string,
+  rows: PendingRow[],
+): Promise<Set<string>> {
+  const covered = new Set<string>();
+  if (rows.length === 0) return covered;
+
+  const { data: logged, error } = await supabase
+    .from("activities")
+    .select("id, contact_id, contact_name, appointment_at, occurred_on")
+    .eq("company_id", companyId)
+    .eq("event_type", "site_visit_booked")
+    .gte("created_at", new Date(Date.now() - LOGGED_VISIT_LOOKBACK_MS).toISOString())
+    .order("created_at", { ascending: false })
+    .limit(200);
+  if (error) {
+    console.error("[eod-entry] logged visits for pending cover:", error.message);
+    return covered;
+  }
+
+  const activities = logged || [];
+  const ids: string[] = [];
+  for (const row of rows) {
+    const match = activities.find(a => loggedVisitCoversPending(a, row));
+    if (!match) continue;
+    covered.add(row.id);
+    ids.push(row.id);
+  }
+  if (ids.length === 0) return covered;
+
+  const { error: resolveErr } = await supabase
+    .from("pending_site_visits")
+    .update({ resolved_at: new Date().toISOString() })
+    .in("id", ids)
+    .eq("company_id", companyId)
+    .is("resolved_at", null);
+  if (resolveErr) {
+    console.error("[eod-entry] resolve covered pending:", resolveErr.message);
+  } else {
+    console.info("[eod-entry] resolved covered pending", { count: ids.length });
+  }
+  return covered;
+}
+
 export async function fetchPendingSiteVisits(
   companyId: string,
   companyName: string,
@@ -334,7 +383,14 @@ export async function fetchPendingSiteVisits(
   }
 
   const rows = (data ?? []) as unknown as PendingRow[];
-  const out = rows.map(r => pendingFromRow(r, vertical, people, opts));
+
+  // EOD-3 / Quotie bookings log site_visit_booked first; the GHL calendar
+  // webhook often arrives after and would reopen the banner. Resolve those
+  // covered rows so they don't show here (or in reports) as still-to-log.
+  // GHL-only bookings have no matching activity, so they stay in the queue.
+  const coveredIds = await resolveCoveredPendingSiteVisits(supabase, companyId, rows);
+  const visibleRows = coveredIds.size > 0 ? rows.filter(r => !coveredIds.has(r.id)) : rows;
+  const out = visibleRows.map(r => pendingFromRow(r, vertical, people, opts));
 
   // Live GHL only for the contact currently open. Other queue rows already
   // have webhook times/names — hitting LeadConnector once per row (serial)

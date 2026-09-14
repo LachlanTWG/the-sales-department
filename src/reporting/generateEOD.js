@@ -442,7 +442,12 @@ function countOutcomes(filtered, ownerName, companyName, allActivities, opts) {
 
   const teamVisited = new Set();
   for (const a of pool) {
-    if (a['Event Type'] !== 'Site Visit Booked' || !inRange(a['Date'])) continue;
+    if (a['Event Type'] !== 'Site Visit Booked') continue;
+    // EOD-3 / Quotie bookings stamp Date as the appointment day, often after
+    // this report's range. A visit on/after rangeStart still covers the Book
+    // Site Visit — Slack + Quotie already ran.
+    const visitDay = (a['Date'] || '').slice(0, 10);
+    if (rangeStart && visitDay && visitDay < rangeStart) continue;
     const key = sheetContactKey(a);
     if (key) teamVisited.add(key);
     const n = normalizeName(a['Contact Name']);

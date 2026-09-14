@@ -1061,9 +1061,10 @@ const server = http.createServer(async (req, res) => {
       rawPayload: body,
       visitKind,
     }).then((r) => {
+      const skip = r.skipped === 'already-logged' ? ' already-logged' : '';
       console.log(
         `[GHL SITE VISIT → pending] ${company.name} / ${salesPersonName} / ${contactName || '?'} ` +
-        `(${visitKind}${r.deduped ? ' deduped' : ''}, id=${r.id || '?'})`
+        `(${visitKind}${r.deduped ? ' deduped' : ''}${skip}, id=${r.id || '?'})`
       );
     }).catch(e => console.error(`[GHL SITE VISIT → pending] Error ${company.name}:`, e.message));
     return;

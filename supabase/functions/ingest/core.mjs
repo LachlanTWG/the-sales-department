@@ -438,3 +438,71 @@ export function toInsertRow(activity, { companyId, salesPersonId, rawPayload }) 
       : null,
   };
 }
+
+// ─── Already-logged site visit (GHL webhook vs EOD/Quotie activity) ──
+// Keep in sync with dashboard/src/lib/siteVisitMatch.ts.
+// EOD-3 / Quotie bookings write site_visit_booked first, then Quotie creates
+// the GHL appointment. The calendar webhook would otherwise reopen the
+// "Log site visit" banner. A GHL-only booking has no matching activity, so
+// the banner still appears.
+
+export const LOGGED_VISIT_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
+export const APPOINTMENT_MATCH_MS = 48 * 60 * 60 * 1000;
+
+export function parseAppointmentMs(value) {
+  if (value == null || value === '') return null;
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+  const s = String(value).trim();
+  if (!s) return null;
+  const naive = s.match(/^(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2})(?::(\d{2}))?$/);
+  if (naive) {
+    const t = Date.parse(`${naive[1]}T${naive[2]}:${naive[3] || '00'}Z`);
+    return Number.isFinite(t) ? t : null;
+  }
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : null;
+}
+
+function isoDateUtc(ms) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function contactIdOf(row) {
+  return String(row.contactId || row.contact_id || '').trim();
+}
+
+function contactNameOf(row) {
+  return String(row.contactName || row.contact_name || '').trim().toLowerCase();
+}
+
+export function sameSiteVisitContact(a, b) {
+  const idA = contactIdOf(a);
+  const idB = contactIdOf(b);
+  if (idA && idB) return idA === idB;
+  const nA = contactNameOf(a);
+  const nB = contactNameOf(b);
+  return !!(nA && nB && nA === nB);
+}
+
+export function loggedVisitCoversPending(activity, pending) {
+  if (!activity || !pending) return false;
+  if (!sameSiteVisitContact(activity, pending)) return false;
+
+  const actAt = parseAppointmentMs(activity.appointmentAt || activity.appointment_at);
+  const pendAt =
+    parseAppointmentMs(pending.appointmentAt || pending.appointment_at) ||
+    parseAppointmentMs(pending.appointmentRaw || pending.appointment_raw);
+  const occurredOn = String(activity.occurredOn || activity.occurred_on || '').slice(0, 10);
+
+  if (actAt != null && pendAt != null) {
+    if (Math.abs(actAt - pendAt) <= APPOINTMENT_MATCH_MS) return true;
+    if (isoDateUtc(actAt) === isoDateUtc(pendAt)) return true;
+    return false;
+  }
+  if (occurredOn && pendAt != null) return occurredOn === isoDateUtc(pendAt);
+  if (actAt == null && pendAt == null) return true;
+  return false;
+}

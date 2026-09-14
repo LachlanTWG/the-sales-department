@@ -36,6 +36,8 @@ import {
   buildEmailActivity,
   buildManualActivity,
   toInsertRow,
+  loggedVisitCoversPending,
+  LOGGED_VISIT_LOOKBACK_MS,
 } from "./core.mjs";
 
 // Supabase's edge runtime exposes waitUntil for post-response work.
@@ -349,6 +351,48 @@ Deno.serve(async (req) => {
         .eq("contact_id", contactId)
         .eq("appointment_raw", appointmentRaw)
         .maybeSingle();
+
+      // EOD-3 / Quotie already logged this visit — don't reopen the banner.
+      // A GHL-only booking has no matching activity, so it still queues.
+      let loggedQuery = supabase
+        .from("activities")
+        .select("id, contact_id, contact_name, appointment_at, occurred_on")
+        .eq("company_id", company.id)
+        .eq("event_type", "site_visit_booked")
+        .gte("created_at", new Date(Date.now() - LOGGED_VISIT_LOOKBACK_MS).toISOString())
+        .order("created_at", { ascending: false })
+        .limit(20);
+      if (pending.contactId) {
+        loggedQuery = loggedQuery.eq("contact_id", pending.contactId);
+      } else if (pending.contactName) {
+        loggedQuery = loggedQuery.ilike("contact_name", pending.contactName);
+      }
+      const { data: loggedRows } = pending.contactId || pending.contactName
+        ? await loggedQuery
+        : { data: [] as { id: string; contact_id: string | null; contact_name: string | null; appointment_at: string | null; occurred_on: string | null }[] };
+      const coveredBy = (loggedRows || []).find((a) => loggedVisitCoversPending(a, pending));
+      if (coveredBy) {
+        if (existing?.id) {
+          await supabase
+            .from("pending_site_visits")
+            .update({ resolved_at: new Date().toISOString(), resolved_activity_id: coveredBy.id })
+            .eq("id", existing.id)
+            .is("resolved_at", null);
+        }
+        console.log(
+          `[GHL SITE VISIT → pending] ${company.name} / ${pending.salesPersonName} / ${pending.contactName || "?"} ` +
+          `(${pending.visitKind} already-logged, activity=${coveredBy.id})`,
+        );
+        return respond(200, {
+          status: "skipped",
+          reason: "already-logged",
+          type: pending.visitKind === "virtual" ? "virtual-site-visit" : "site-visit",
+          company: company.name,
+          salesPerson: pending.salesPersonName,
+          visitKind: pending.visitKind,
+        });
+      }
+
       const row = {
         company_id: company.id,
         contact_id: pending.contactId,

@@ -405,6 +405,51 @@ async function fetchOpenPendingSiteVisits(companyName) {
   }
 }
 
+/**
+ * Find a site_visit_booked activity that already covers this GHL calendar
+ * booking. Keep the window in sync with dashboard/src/lib/siteVisitMatch.ts
+ * and supabase/functions/ingest/core.mjs (14 days, 48h appointment skew).
+ *
+ * EOD-3 / Quotie write the activity first, then create the GHL appointment —
+ * without this, the calendar webhook reopens the "Log site visit" banner.
+ * A GHL-only booking has no matching activity, so the banner still appears.
+ */
+async function findLoggedSiteVisit(client, { companyId, contactId, contactName, appointmentAt }) {
+  const appointmentTs = (() => {
+    if (!appointmentAt) return null;
+    const t = Date.parse(String(appointmentAt));
+    return Number.isFinite(t) ? new Date(t).toISOString() : null;
+  })();
+
+  const { rows } = await client.query(
+    `select id
+       from activities
+      where company_id = $1
+        and event_type = 'site_visit_booked'
+        and created_at > now() - interval '14 days'
+        and (
+          ($2::text is not null and length($2) > 0 and contact_id = $2)
+          or (
+            ($2 is null or $2 = '')
+            and $3::text is not null and length($3) > 0
+            and lower(trim(contact_name)) = lower(trim($3))
+          )
+        )
+        and (
+          $4::timestamptz is null
+          or (appointment_at is null and occurred_on = ($4::timestamptz at time zone 'UTC')::date)
+          or appointment_at between $4::timestamptz - interval '48 hours'
+                                and $4::timestamptz + interval '48 hours'
+          or (appointment_at at time zone 'UTC')::date = ($4::timestamptz at time zone 'UTC')::date
+          or occurred_on = ($4::timestamptz at time zone 'UTC')::date
+        )
+      order by created_at desc
+      limit 1`,
+    [companyId, contactId, contactName, appointmentTs]
+  );
+  return rows[0] || null;
+}
+
 async function upsertPendingSiteVisit(params) {
   if (!isEnabled()) return { skipped: true };
   const client = await getPool().connect();
@@ -436,6 +481,25 @@ async function upsertPendingSiteVisit(params) {
         limit 1`,
       [companyId, contactId, appointmentRaw]
     );
+
+    const logged = await findLoggedSiteVisit(client, {
+      companyId, contactId, contactName, appointmentAt,
+    });
+    if (logged) {
+      if (existing.rows[0]) {
+        const id = existing.rows[0].id;
+        await client.query(
+          `update pending_site_visits
+              set resolved_at = now(),
+                  resolved_activity_id = $2
+            where id = $1
+              and resolved_at is null`,
+          [id, logged.id]
+        );
+        return { id, deduped: true, skipped: 'already-logged', activityId: logged.id };
+      }
+      return { id: null, skipped: 'already-logged', activityId: logged.id };
+    }
 
     if (existing.rows[0]) {
       const id = existing.rows[0].id;

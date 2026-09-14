@@ -73,7 +73,7 @@ type CountedData = {
   customNotes: { contactName: string; note: string }[]; // EOD 4 custom outcomes, surfaced verbatim
   /** Requires Quoting contacts still missing a team quote in-range. */
   quotingOpen: string[];
-  /** Book Site Visit contacts still missing a logged site_visit_booked in-range. */
+  /** Book Site Visit contacts still missing a matching site_visit_booked (including future-dated Quotie/EOD-3 bookings). */
   visitsOpen: string[];
 };
 
@@ -86,6 +86,9 @@ type CountOpts = {
 
 /** How far before a quote we look for another exec's Requires Quoting. */
 const HANDOFF_LOOKBACK_DAYS = 30;
+/** How far after the report range we load site_visit_booked rows so an EOD-3
+ *  / Quotie booking dated on the appointment day still counts as covered. */
+const VISIT_COVERAGE_LOOKAHEAD_DAYS = 90;
 
 type MessageScope = "personal" | "team";
 
@@ -471,7 +474,12 @@ function countOutcomes(
 
   const teamVisited = new Set<string>();
   for (const a of allActivities) {
-    if (a.event_type !== "site_visit_booked" || !inRange(a.occurred_on)) continue;
+    if (a.event_type !== "site_visit_booked") continue;
+    // EOD-3 / Quotie bookings stamp occurred_on as the appointment day, which
+    // is often after this report's range. A visit dated on/after rangeStart
+    // still covers the Book Site Visit — Slack + Quotie already ran.
+    const visitDay = (a.occurred_on || "").slice(0, 10);
+    if (rangeStart && visitDay && visitDay < rangeStart) continue;
     const key = contactKey(a.company_id, a.contact_id, a.contact_name);
     if (key) teamVisited.add(key);
     const n = normalizeName(a.contact_name);
@@ -1611,13 +1619,14 @@ export async function loadDashboardMessages(
   // Pull a lookback window so "I RQ'd Friday, Max quoted Monday" still pairs
   // on the Monday card. Counts stay clipped to [rangeStart, rangeEnd].
   const pairStart = addDaysIso(rangeStart, -HANDOFF_LOOKBACK_DAYS);
+  const pairEnd = addDaysIso(rangeEnd, VISIT_COVERAGE_LOOKAHEAD_DAYS);
   const rows = ids.length === 0 ? [] : dedupeActivities(await pageAll<ActivityRow>((from, to) =>
     supabase
       .from("activities")
       .select(ACTIVITY_SELECT)
       .in("company_id", ids)
       .gte("occurred_on", pairStart)
-      .lte("occurred_on", rangeEnd)
+      .lte("occurred_on", pairEnd)
       .order("occurred_on", { ascending: true })
       .order("id", { ascending: true })
       .range(from, to),

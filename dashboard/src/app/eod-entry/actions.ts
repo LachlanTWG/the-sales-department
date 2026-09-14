@@ -35,6 +35,7 @@ import {
   type QuotieTeamMember,
 } from "./quotie";
 import { fetchGhlContact, fetchPreviousQuotes, type PreviousQuote } from "./data";
+import { pendingMatchesBooking } from "@/lib/siteVisitMatch";
 
 export type EodEntryInput = {
   token: string;
@@ -258,6 +259,8 @@ type HandleSiteVisitBookedInput = {
   quotieAssignTo?: string;
   quotieGhlAssignedUserId?: string;
   quotieTime?: string;
+  /** Visit day sent to Quotie. Defaults to occurredOn (the log/booking date). */
+  quotieVisitDate?: string;
 
   resolvePending: boolean;
   /** Direct pending row id when the caller already knows it (banner path). */
@@ -385,7 +388,7 @@ async function handleSiteVisitBooked(
       // Linking an existing GHL-originated appointment → never create a new one.
       const linking = Boolean(input.ghlAppointmentId?.trim());
       const res = await createQuotieSiteVisit(input.quotieConfig, {
-        date: input.occurredOn,
+        date: input.quotieVisitDate || input.occurredOn,
         time: input.quotieTime,
         contact_name: input.contactName,
         contact_phone: input.contactPhone,
@@ -434,38 +437,68 @@ async function handleSiteVisitBooked(
         patch.summary_sent_at = result.slack.ok && result.slack.ran ? new Date().toISOString() : null;
       }
 
-      let q = supabase
-        .from("pending_site_visits")
-        .update(patch)
-        .eq("company_id", input.companyId)
-        .is("resolved_at", null);
-
       if (input.pendingId?.trim()) {
-        q = q.eq("id", input.pendingId.trim());
-      } else {
-        // Pre-resolve any open pending row for this contact + appointment time
-        // so an EOD-3-handled booking never resurfaces in the banner. Match on
-        // contact (id when known, else name) and the parsed appointment instant.
-        q = q.is("dismissed_at", null);
-        if (input.contactId?.trim()) {
-          q = q.eq("contact_id", input.contactId.trim());
-        } else if (input.contactName?.trim()) {
-          q = q.eq("contact_name", input.contactName.trim());
+        const { error } = await supabase
+          .from("pending_site_visits")
+          .update(patch)
+          .eq("id", input.pendingId.trim())
+          .eq("company_id", input.companyId)
+          .is("resolved_at", null);
+        if (error) {
+          console.error("[handleSiteVisitBooked] resolve pending:", error.message);
+          result.pending = { ran: true, ok: false, detail: error.message };
         } else {
-          // Nothing to match on — skip rather than resolving unrelated rows.
-          result.pending = { ran: true, ok: true, detail: "no match key" };
-          return result;
+          result.pending = { ran: true, ok: true };
         }
-        const machineAppt = toMachineAppointmentAt(input.appointmentAt, input.appointmentDisplay);
-        if (machineAppt) q = q.eq("appointment_at", machineAppt);
-      }
-
-      const { error } = await q;
-      if (error) {
-        console.error("[handleSiteVisitBooked] resolve pending:", error.message);
-        result.pending = { ran: true, ok: false, detail: error.message };
+      } else if (!input.contactId?.trim() && !input.contactName?.trim()) {
+        result.pending = { ran: true, ok: true, detail: "no match key" };
       } else {
-        result.pending = { ran: true, ok: true };
+        // Pre-resolve open rows for this contact whose appointment matches
+        // (48h / same day) — exact timestamptz equality misses TZ skew, and
+        // the GHL webhook often lands AFTER this submit so matching has to
+        // be loose enough to catch an in-flight pending.
+        let openQ = supabase
+          .from("pending_site_visits")
+          .select("id, contact_id, contact_name, appointment_at, appointment_raw, created_at")
+          .eq("company_id", input.companyId)
+          .is("resolved_at", null)
+          .is("dismissed_at", null);
+        if (input.contactId?.trim()) {
+          openQ = openQ.eq("contact_id", input.contactId.trim());
+        } else {
+          openQ = openQ.eq("contact_name", input.contactName.trim());
+        }
+        const { data: openRows, error: openErr } = await openQ;
+        if (openErr) {
+          console.error("[handleSiteVisitBooked] resolve pending:", openErr.message);
+          result.pending = { ran: true, ok: false, detail: openErr.message };
+        } else {
+          const booking = {
+            contactId: input.contactId,
+            contactName: input.contactName,
+            appointmentAt: toMachineAppointmentAt(input.appointmentAt, input.appointmentDisplay) || input.appointmentAt,
+            occurredOn: input.occurredOn,
+          };
+          const ids = (openRows || [])
+            .filter(row => pendingMatchesBooking(row, booking))
+            .map(row => row.id);
+          if (ids.length === 0) {
+            result.pending = { ran: true, ok: true, detail: "no open row" };
+          } else {
+            const { error } = await supabase
+              .from("pending_site_visits")
+              .update(patch)
+              .in("id", ids)
+              .eq("company_id", input.companyId)
+              .is("resolved_at", null);
+            if (error) {
+              console.error("[handleSiteVisitBooked] resolve pending:", error.message);
+              result.pending = { ran: true, ok: false, detail: error.message };
+            } else {
+              result.pending = { ran: true, ok: true };
+            }
+          }
+        }
       }
     } catch (e) {
       console.error("[handleSiteVisitBooked] resolve pending:", (e as Error).message);
@@ -895,7 +928,7 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
         companyId: company.id,
         companyName: company.name,
         salesPersonName,
-        occurredOn: input.quotie.date || input.occurred_on,
+        occurredOn: input.occurred_on,
         contactName: quotieContactName,
         contactId: quotieGhlContactId,
         contactPhone: svGhlContact.phone || undefined,
@@ -906,6 +939,7 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
         roughJobValue: input.quotie.rough_job_value,
         idealStartDate: input.quotie.ideal_start,
         detailsComment: input.quotie.details,
+        quotieVisitDate: input.quotie.date || input.occurred_on,
         // EOD-3 path now ALSO logs the site_visit_booked activity + Slack.
         logActivity: true,
         sendSlack: input.quotie.send_slack !== false, // default true; checkbox gates this leg only
