@@ -26,12 +26,16 @@ import {
 } from "@/lib/manualActivities";
 import {
   createQuotieCallback,
+  createQuotieFollowUp,
   createQuotieSiteVisit,
   createQuotieTask,
   getQuotieTeamMembers,
-  resolveAnsweredCallback,
-  resolveQuotieAction,
+  resolveAnsweredForLane,
+  resolveLane,
+  resolveQuotieActionForLane,
+  type QuotieCallResult,
   type QuotieConfig,
+  type QuotieLane,
   type QuotieTeamMember,
 } from "./quotie";
 import { fetchGhlContact, fetchPreviousQuotes, type PreviousQuote } from "./data";
@@ -56,12 +60,18 @@ export type EodEntryInput = {
    * are user-editable form values.
    */
   quotie?: {
-    type: "task" | "site_visit" | "callback";
+    type: "task" | "site_visit" | "callback" | "follow_up";
     title?: string;
     notes?: string;
     due_date?: string;
     /** When-to-call-back ISO for callback_requested (Not a Good Time). */
     callback_date?: string;
+    /**
+     * Post-quote follow-up date/time (YYYY-MM-DD / HH:MM), read by Quotie as a
+     * wall clock in the company's timezone. Never an ISO timestamp.
+     */
+    follow_up_date?: string;
+    follow_up_time?: string;
     date?: string;
     time?: string;
     address?: string;
@@ -92,6 +102,12 @@ export type EodEntryInput = {
   quotie_answered_callback?: {
     notes?: string;
   };
+  /**
+   * Which Quotie lane this log drives (the form's Pre-quote / Post-quote
+   * toggle). Absent → the server derives it from eod_fields.stage. Anything
+   * else than the two known values is ignored and re-derived.
+   */
+  quotie_lane?: QuotieLane;
 };
 
 export type EodEntryResult =
@@ -147,7 +163,9 @@ function ghlAppointmentIdFromRawPayload(rawPayload: unknown): string | undefined
 function callbackReasonFor(outcome: string, stdOutcome: string): string {
   switch (outcome) {
     case "requires_quoting": return "Requires quoting (EOD log)";
-    case "callback_requested": return "Not a good time — parked (EOD log)";
+    // callback_requested now covers both "Not a Good Time to Talk" and
+    // "Not Ready Yet - Pre-Quote", so the reason carries the actual outcome.
+    case "callback_requested": return `Call back requested — ${stdOutcome || "parked"} (EOD log)`;
     case "no_answer": return "No answer (EOD log)";
     case "voicemail": return "Left voicemail (EOD log)";
     case "lost": return `Lost — ${stdOutcome || "DQ"} (EOD log)`;
@@ -172,6 +190,90 @@ function callbackDetailFor(
   const parts = [label];
   if (warnings?.length) parts.push(warnings.join("; "));
   return parts.join(" · ");
+}
+
+/**
+ * Quotie reads bare YYYY-MM-DD dates in the company's timezone, and every EOD
+ * Creator client is AU east coast. Vercel runs UTC, so every date this file
+ * computes or formats goes through Intl with this zone — never through
+ * server-local Date getters (which would be a day out after 10am UTC).
+ */
+const QUOTIE_TZ = "Australia/Sydney";
+
+/** YYYY-MM-DD `days` from now, in QUOTIE_TZ. */
+function isoInDaysTz(days: number): string {
+  const d = new Date(Date.now() + days * 86_400_000);
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: QUOTIE_TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(d);
+  } catch {
+    return d.toISOString().slice(0, 10);
+  }
+}
+
+/**
+ * Quotie's returned follow_up_date (a timestamptz) as "18 Sep", plus " 14:30"
+ * when it carries a real time. A date-only reschedule is stored as company-local
+ * midnight, which reads back as "no time set" — so midnight prints bare.
+ */
+function formatFollowUpDate(raw: string | null | undefined): string {
+  const s = (raw || "").trim();
+  if (!s) return "";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return "";
+  try {
+    const parts = new Intl.DateTimeFormat("en-AU", {
+      timeZone: QUOTIE_TZ,
+      day: "numeric",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(d);
+    const get = (type: string) => parts.find(p => p.type === type)?.value || "";
+    const day = get("day");
+    const month = get("month");
+    const hour = get("hour");
+    const minute = get("minute");
+    if (!day || !month) return s.slice(0, 10);
+    const date = `${day} ${month}`;
+    return hour === "00" && minute === "00" ? date : `${date} ${hour}:${minute}`;
+  } catch {
+    return s.slice(0, 10);
+  }
+}
+
+/** Human success detail for an api-follow-ups call (post-quote lane banner). */
+function followUpDetailFor(outcome: string, res: QuotieCallResult): string | undefined {
+  const when = formatFollowUpDate(res.follow_up?.follow_up_date);
+  const label =
+    outcome === "reschedule"
+      ? `Follow-up: rescheduled${when ? ` to ${when}` : ""}`
+      : outcome === "no_answer"
+        ? `Follow-up: no answer logged${when ? `, next ${when}` : ""}`
+        : outcome === "verbal_yes" ? "Follow-up: marked verbal yes"
+        : outcome === "hot" ? "Follow-up: marked hot"
+        : outcome === "lost" ? "Follow-up: quote marked lost"
+        : outcome === "abandoned" ? "Follow-up: quote abandoned"
+        : "Follow-up updated";
+
+  const parts = [label];
+  if (res.follow_up?.group_name) parts.push(res.follow_up.group_name);
+  const others = res.follow_up?.other_open_groups ?? 0;
+  if (others > 0) parts.push(`${others} other open quote${others === 1 ? "" : "s"} untouched`);
+  if (res.warnings?.length) parts.push(res.warnings.join("; "));
+  return parts.join(" · ");
+}
+
+/** Failure detail for an api-follow-ups call — 404 gets the lane hint. */
+function followUpFailureDetail(res: QuotieCallResult): string | undefined {
+  return res.no_quote_group
+    ? "no sent quote in Quotie for this contact — switch to Pre-quote"
+    : res.error;
 }
 
 export type CompleteSiteVisitInput = {
@@ -865,6 +967,14 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
     withContact?.contact_name?.trim() || items[0]?.contact_name?.trim() || "";
   const quotieGhlContactId = withContact?.contact_id?.trim() || undefined;
 
+  // Lane: the form's toggle wins (the exec can override a mis-set EOD 1 stage),
+  // otherwise derive from the stage. Client values are validated, never trusted
+  // verbatim — an unknown string re-derives from the stage.
+  const lane: QuotieLane =
+    input.quotie_lane === "pre_quote" || input.quotie_lane === "post_quote"
+      ? input.quotie_lane
+      : resolveLane(input.eod_fields?.stage || "", quotieConfig);
+
   // ── Site-visit path (outcome-gated, unchanged semantics) ──────────────
   let visitRes: { ok: boolean; detail?: string } | null = null;
   if (
@@ -874,8 +984,8 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
     quotieConfig?.api_key
   ) {
     const stdOutcome = input.eod_fields.std_outcome || "";
-    // NEVER trust the client's `type` — re-resolve server-side.
-    const action = resolveQuotieAction(stdOutcome, quotieConfig);
+    // NEVER trust the client's `type` — re-resolve server-side, in this lane.
+    const action = resolveQuotieActionForLane(stdOutcome, lane, quotieConfig);
     if (!action) {
       visitRes = { ok: false, detail: "no Quotie action for this outcome" };
     } else if (action.type !== input.quotie.type) {
@@ -899,6 +1009,29 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
       } else {
         visitRes = { ok: false, detail: res.error };
       }
+    } else if (action.type === "follow_up") {
+      // Post-quote lane — acts on the contact's most urgent open SENT quote
+      // group. A contact with no sent quote comes back 404 no_quote_group; the
+      // detail tells the exec to flip the toggle to Pre-quote.
+      const outcome = action.outcome || "reschedule";
+      // A reschedule needs a date; the form requires one, but a stale client
+      // (or an override that turns another outcome into a reschedule) might not
+      // send it — default to tomorrow, company-local, never server-local.
+      const followUpDate =
+        input.quotie.follow_up_date?.trim() ||
+        (outcome === "reschedule" ? isoInDaysTz(1) : undefined);
+      const res = await createQuotieFollowUp(quotieConfig, {
+        outcome,
+        ghl_contact_id: quotieGhlContactId,
+        notes: input.quotie.notes,
+        salesPersonName,
+        assign_to: action.assign_to,
+        follow_up_date: followUpDate,
+        follow_up_time: input.quotie.follow_up_time,
+      });
+      visitRes = res.ok
+        ? { ok: true, detail: followUpDetailFor(outcome, res) }
+        : { ok: false, detail: followUpFailureDetail(res) };
     } else if (action.type === "site_visit") {
       // EOD-3 "Book Site Visit": route through the shared booking handler so
       // this path does everything the pending-banner path does — previously it
@@ -991,20 +1124,38 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
     input.eod_fields &&
     quotieConfig?.api_key
   ) {
-    const outcomeAction = resolveQuotieAction(input.eod_fields.std_outcome || "", quotieConfig);
-    const eod3IsCallback = outcomeAction?.type === "callback";
-    const answeredOutcome = resolveAnsweredCallback(input.eod_fields.answered || "", quotieConfig);
-    if (answeredOutcome && !eod3IsCallback) {
-      const res = await createQuotieCallback(quotieConfig, {
-        outcome: answeredOutcome,
-        ghl_contact_id: quotieGhlContactId,
-        notes: input.quotie_answered_callback.notes,
-        salesPersonName,
-        callback_reason: callbackReasonFor(answeredOutcome, input.eod_fields.std_outcome || ""),
-      });
-      visitRes = res.ok
-        ? { ok: true, detail: callbackDetailFor(answeredOutcome, res.noop, res.warnings) }
-        : { ok: false, detail: res.error };
+    const outcomeAction = resolveQuotieActionForLane(
+      input.eod_fields.std_outcome || "",
+      lane,
+      quotieConfig,
+    );
+    // Skip when the EOD 3 outcome already owns this contact's pipeline move in
+    // this lane — never double-post the same contact.
+    const eod3Owns = outcomeAction?.type === "callback" || outcomeAction?.type === "follow_up";
+    const answered = resolveAnsweredForLane(input.eod_fields.answered || "", lane, quotieConfig);
+    if (answered && !eod3Owns) {
+      if (answered.kind === "follow_up") {
+        const res = await createQuotieFollowUp(quotieConfig, {
+          outcome: answered.outcome,
+          ghl_contact_id: quotieGhlContactId,
+          notes: input.quotie_answered_callback.notes,
+          salesPersonName,
+        });
+        visitRes = res.ok
+          ? { ok: true, detail: followUpDetailFor(answered.outcome, res) }
+          : { ok: false, detail: followUpFailureDetail(res) };
+      } else {
+        const res = await createQuotieCallback(quotieConfig, {
+          outcome: answered.outcome,
+          ghl_contact_id: quotieGhlContactId,
+          notes: input.quotie_answered_callback.notes,
+          salesPersonName,
+          callback_reason: callbackReasonFor(answered.outcome, input.eod_fields.std_outcome || ""),
+        });
+        visitRes = res.ok
+          ? { ok: true, detail: callbackDetailFor(answered.outcome, res.noop, res.warnings) }
+          : { ok: false, detail: res.error };
+      }
     }
   }
 
@@ -1014,7 +1165,7 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
     // Title: client-provided → outcome template (when the outcome happens to
     // map to a task action) → plain fallback.
     const outcomeAction = input.eod_fields
-      ? resolveQuotieAction(input.eod_fields.std_outcome || "", quotieConfig)
+      ? resolveQuotieActionForLane(input.eod_fields.std_outcome || "", lane, quotieConfig)
       : null;
     const taskAction = outcomeAction?.type === "task" ? outcomeAction : null;
     const template = taskAction?.titleTemplate || "Follow up with {contact}";
