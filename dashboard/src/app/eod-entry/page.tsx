@@ -15,6 +15,7 @@ import {
   fetchAllExecNames,
   fetchCompanyToday,
   fetchContactHistory,
+  companyExtraSources,
   fetchEodOptions,
   fetchGhlContact,
   fetchMyToday,
@@ -114,7 +115,11 @@ export default async function EodEntryPage({
       .order("name")
       .then(({ data }) => (data ?? []).map(p => p.name as string));
     // Kick off independent work before the roster comes back.
-    const optionsPromise = fetchEodOptions(company.id, company.owner_name);
+    const optionsPromise = fetchEodOptions(
+      company.id,
+      company.owner_name,
+      companyExtraSources(company.name, company.slug),
+    );
     const historyPromise = fetchContactHistory(company.id, cId, scraped);
     const people = await peoplePromise;
     const ghlLocationId = location || (company.ghl_location_id as string) || "";

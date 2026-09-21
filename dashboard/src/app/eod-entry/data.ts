@@ -860,6 +860,19 @@ const DEFAULT_SOURCES = [
   "Direct Lead passed on from Client",
 ];
 
+/**
+ * Client-specific EOD 5 sources that aren't in the shared defaults. Matched
+ * on company name/slug (same loose match as companyVertical) so a slug
+ * rename doesn't silently drop the option. Learned values need 3 recent
+ * logs before they surface, so a brand-new channel has to be listed here.
+ */
+export function companyExtraSources(companyName: string, slug?: string): string[] {
+  const s = `${companyName} ${slug || ""}`.toLowerCase();
+  // HDK Longrun Roofing — dedicated landing page launched Sep 2026.
+  if (s.includes("hdk")) return ["Landing Page Lead Form"];
+  return [];
+}
+
 const EVENT_LABELS: Record<string, string> = {
   eod_update: "EOD update",
   quote_sent: "Quote sent",
@@ -917,6 +930,7 @@ function mergeLearned(
 export async function fetchEodOptions(
   companyId: string,
   ownerName?: string | null,
+  extraSources: string[] = [],
 ): Promise<EodOptions> {
   const supabase = createAdminClient();
   const { data } = await supabase
@@ -941,7 +955,7 @@ export async function fetchEodOptions(
   return {
     stages: mergeLearned(counts[0], DEFAULT_STAGES),
     outcomes: mergeLearned(counts[1], outcomes, OUTCOME_ALIASES),
-    sources: mergeLearned(counts[2], DEFAULT_SOURCES),
+    sources: mergeLearned(counts[2], [...DEFAULT_SOURCES, ...extraSources]),
   };
 }
 
