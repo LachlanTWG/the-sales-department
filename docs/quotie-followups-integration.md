@@ -63,6 +63,8 @@ For a terminal outcome (`lost` / `abandoned` / `requires_quoting`) the follow-up
 2. **EOD 2** — the no-answer / voicemail signal, when EOD 3 mapped to nothing
 3. **plain** — neither, and the exec ticked the box anyway
 
+The checkbox owns the **whole** leg: unticked, nothing is sent, outcome-driven moves included. An exec who unticks it on a Lost call does not find the quote closed in Quotie anyway. (Ticked, the client always sends `quotie_follow_up` — an empty object for the terminal outcomes where the picker is hidden, since presence is the signal.)
+
 The exec's date is then merged into whichever call that is:
 
 | Plan | Endpoint field | Date |

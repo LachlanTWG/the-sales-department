@@ -358,6 +358,25 @@ test("plan: an unticked checkbox with no outcome and no answer does nothing", ()
   assert.equal(plan({ followUpRequested: false }), null);
 });
 
+test("plan: UNTICKED means nothing fires — not even an outcome-driven move", () => {
+  // The checkbox owns the whole leg. An exec who unticks it on a Lost call
+  // must not find the quote closed in Quotie anyway.
+  assert.equal(plan({ lane: "post_quote", stdOutcome: "DQ - Price", followUpRequested: false }), null);
+  assert.equal(plan({ lane: "pre_quote", stdOutcome: "Lost - Price", followUpRequested: false }), null);
+  assert.equal(plan({ lane: "post_quote", stdOutcome: "Abandoned - Headache", followUpRequested: false }), null);
+  assert.equal(plan({ lane: "pre_quote", stdOutcome: "Requires Quoting", followUpRequested: false }), null);
+  assert.equal(
+    plan({ lane: "post_quote", stdOutcome: "Not Ready Yet - Post Quote", followUpRequested: false }),
+    null,
+  );
+});
+
+test("plan: UNTICKED silences the EOD 2 no-answer signal too", () => {
+  assert.equal(plan({ lane: "post_quote", answered: "Didn't Answer", followUpRequested: false }), null);
+  assert.equal(plan({ lane: "pre_quote", answered: "Didn't Answer", followUpRequested: false }), null);
+  assert.equal(plan({ lane: "pre_quote", answered: "Voicemail", followUpRequested: false }), null);
+});
+
 test("plan: post-lane plain set → reschedule", () => {
   assert.deepEqual(plan({ lane: "post_quote" }), {
     kind: "follow_up",
@@ -412,8 +431,11 @@ test("plan: EOD 2 no-answer drives the call when EOD 3 maps to nothing", () => {
   });
 });
 
-test("plan: EOD 2 fires even with the checkbox untouched by a plain set", () => {
-  assert.equal(plan({ answered: "Didn't Answer", followUpRequested: false })?.source, "eod2");
+test("plan: a ticked box with an EOD 2 answer resolves to eod2, never to plain", () => {
+  // The client sends quotie_follow_up (the tick) AND quotie_answered_callback;
+  // precedence must still route it through the no-answer cadence.
+  assert.equal(plan({ answered: "Didn't Answer" })?.source, "eod2");
+  assert.equal(plan({ lane: "post_quote", answered: "Voicemail" })?.source, "eod2");
 });
 
 test("plan: a site-visit / task outcome leaves the plain path in charge", () => {

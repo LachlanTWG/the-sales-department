@@ -363,6 +363,10 @@ export function resolveFollowUpPlan(args: {
 }): QuotieFollowUpPlan | null {
   const { lane, stdOutcome, answered, config, followUpRequested } = args;
   if (!config?.api_key) return null;
+  // The checkbox owns the WHOLE leg, outcome-driven moves included. Unticked
+  // means nothing is sent — an exec who unticks it on a Lost call must not
+  // find the quote closed in Quotie anyway.
+  if (!followUpRequested) return null;
 
   const plan = (
     kind: "follow_up" | "callback",
@@ -390,7 +394,6 @@ export function resolveFollowUpPlan(args: {
   const eod2 = resolveAnsweredForLane(answered, lane, config);
   if (eod2) return plan(eod2.kind, eod2.outcome, "eod2");
 
-  if (!followUpRequested) return null;
   return lane === "post_quote"
     ? plan("follow_up", "reschedule", "plain")
     : plan("callback", "callback_requested", "plain");

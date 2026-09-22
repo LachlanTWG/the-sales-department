@@ -800,6 +800,10 @@ export function EodEntryForm({
     // "Set follow-up" itself: presence = ticked. With no outcome-driven move
     // this IS the leg (reschedule / callback_requested); otherwise the server
     // merges the date into that move. Terminal outcomes carry no date.
+    // PRESENCE is the signal, so this goes whenever the box is ticked — empty
+    // object included, as it is for lost / abandoned / requires_quoting where
+    // the picker is hidden. Unticked sends nothing at all and the server fires
+    // no pipeline call, outcome-driven or otherwise.
     const quotie_follow_up: EodEntryInput["quotie_follow_up"] =
       isEod && qfuEnabled
         ? {
