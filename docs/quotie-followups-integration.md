@@ -1,6 +1,6 @@
 # Quotie Follow-Ups Integration (post-quote lane)
 
-> The companion to [`quotie-pipeline-integration.md`](./quotie-pipeline-integration.md). That doc wired the EOD popup into Quotie's **pre-quote** pipeline (`api-callbacks` → callback leads, Day N / Parked / Requires Quoting / Lost). This one adds the **post-quote** half: once a quote has actually been sent, the same EOD selector now drives Quotie's quote follow-up cadence via `api-follow-ups`. Built on branch `quotie-followups` — **not deployed, not cut over to any company yet.**
+> The companion to [`quotie-pipeline-integration.md`](./quotie-pipeline-integration.md). That doc wired the EOD popup into Quotie's **pre-quote** pipeline (`api-callbacks` → callback leads, Day N / Parked / Requires Quoting / Lost). This one adds the **post-quote** half: once a quote has actually been sent, the same EOD selector now drives Quotie's quote follow-up cadence via `api-follow-ups`. Built on branch `quotie-followups` — **not deployed, not cut over to any company yet.** The popup now also *reads* Quotie when it opens, and splits the old single Quotie checkbox into an independent task checkbox and a follow-up checkbox.
 
 ## Why two lanes
 
@@ -15,11 +15,70 @@ So the popup now picks a lane, and the two never cross.
 
 ## How the lane is picked
 
-**EOD 1 · Stage drives it.** Stage `Post Quote Follow Up` → post-quote lane. Everything else → pre-quote.
+**Quotie answers first.** When the popup opens it asks Quotie what it already knows about this GHL contact (`GET api-follow-ups/contact`, below). Quotie's own `lane` is the default: it is the only side that can see whether a **sent** quote is still open. A contact with one is post-quote no matter what the GHL stage says.
 
-**The exec can flip it.** A two-button Pre-quote / Post-quote toggle sits in its own "Quotie lane" row directly under EOD 3 (same styling as the EOD 1 stage buttons). It appears whenever the chosen outcome or EOD 2 answer maps to a Quotie pipeline move in *either* lane — so an exec on the Post Quote stage who picks "Not Ready Yet - Pre-Quote" still sees it, with an amber hint that nothing will be sent in the current lane and they should switch. It is hidden for the plain "also create a task" case. Flipping it overrides the stage for that one submission; changing the stage resets the override, and so does a successful submit.
+**EOD 1 · Stage takes over the moment the exec touches it.** Stage `Post Quote Follow Up` → post-quote lane, everything else → pre-quote. Untouched, the stage only decides the lane when the Quotie read returned nothing (integration off, no contact id, or the read failed).
+
+**The exec can still flip it.** The Pre-quote / Post-quote toggle now lives *inside* the follow-up panel and is visible the whole time that panel is open. Flipping it overrides both for that one submission; changing the stage resets the override, and so does a successful submit. When the chosen outcome only maps in the *other* lane, an amber hint says so — logging in the current lane just sets the follow-up date.
 
 **The server never trusts the toggle blindly.** `submitEodEntry` re-derives the lane from `eod_fields.stage` whenever the client sends nothing or sends an unrecognised value, and it always re-resolves the action from `quotie_config` — the client's `type` is still only used as a "did the config change under me" cross-check, exactly as before.
+
+## Reading Quotie on open
+
+`GET {api_url}/api-follow-ups/contact?ghl_contact_id=…` — side-effect free on Quotie's side (no contact import, no attempt rows, no writes) and carrying names only, never auth ids, so the whole payload is handed straight to the browser.
+
+`getQuotieFollowUpState()` runs inside the page's existing `Promise.all` with a **4s** guard (the write calls get 10s; this one is on the popup's critical path) and never throws. It returns the contact, the lane, and each lane's current record:
+
+- `post_quote` — the primary open sent quote group: `follow_up_local` (`{date, time}` company-local wall clock, `time: null` at midnight), `reschedule_count`, `group_name`, `is_hot`, `verbal_confirmed_at`, `other_open_groups`, `pipeline_value`
+- `pre_quote` — the active callback lead: `callback_local`, `attempt_count`, `status`, `callback_reason`
+
+The panel prints it as a single line, always for the lane the exec is about to log against:
+
+> In Quotie: follow-up due Thu 18 Sep 14:30 · 2nd follow-up · Metal Roof Options · +1 other open quote
+> In Quotie: call back Mon 22 Sep · 3 attempts · Requires Quoting
+
+An overdue date renders amber with `(overdue)`. A miss reads `No Quotie record yet — logging will create a callback lead.` (pre) or `No open sent quote in Quotie — switch to Pre-quote to log a call-back.` (post). A failed read reads `Couldn't reach Quotie — will still update on submit.` — the read is advisory only and never blocks the log.
+
+The same read runs again through the `fetchQuotieFollowUpState` server action after every successful submit, so the line shows the move that just landed without reloading the popup. It also prefills the date/time picker, but **only when Quotie's date is today or later** — a stale date would quietly re-book the past.
+
+## The two checkboxes
+
+The sticky bar carries two independent checkboxes, left of "Log it". Either, both or neither:
+
+| Checkbox | Fires | Auto-ticks when |
+|---|---|---|
+| **Quotie task** | `api-tasks` only | the EOD 3 outcome maps to a `task` action |
+| **Set follow-up** | the one pipeline call (below) | the outcome or EOD 2 answer means something to Quotie in *either* lane |
+
+Touching either one pins it for the rest of the session. They no longer share a box: a submit can now book a site visit, move the pipeline **and** create a task, and the banner reports each leg on its own line (`✓ Site visit booked in Quotie`, `✓ Follow-up set in Quotie · 18 Sep 14:30 · 3rd follow-up`, `✓ Task created in Quotie`; failures per leg in amber).
+
+For a terminal outcome (`lost` / `abandoned` / `requires_quoting`) the follow-up checkbox reads **"Update Quotie"** instead, and the date picker is hidden — the move still fires, there is just nowhere for a date to land.
+
+## One call, whatever drove it
+
+"Set follow-up" never adds a *second* Quotie call. `resolveFollowUpPlan()` (pure, pinned by `src/scripts/quotieResolver.test.mts`) picks exactly one, in this precedence:
+
+1. **EOD 3** — the standard outcome maps to a pipeline move in this lane
+2. **EOD 2** — the no-answer / voicemail signal, when EOD 3 mapped to nothing
+3. **plain** — neither, and the exec ticked the box anyway
+
+The exec's date is then merged into whichever call that is:
+
+| Plan | Endpoint field | Date |
+|---|---|---|
+| post `reschedule` / `verbal_yes` / `hot` | `follow_up_date` + `follow_up_time` | merged; a reschedule with no date defaults to tomorrow |
+| post `no_answer` (EOD 2) | `follow_up_date` + `follow_up_time` | merged — an explicit date **replaces** Quotie's no-answer bump |
+| pre `callback_requested` | `callback_date` + `callback_time` | merged; defaults to tomorrow on the plain path |
+| pre `no_answer` / `voicemail` (EOD 2) | `callback_date` + `callback_time` | merged — replaces the next-business-day bump; the 5-strike auto-abandon is untouched |
+| post/pre `lost` / `abandoned`, pre `requires_quoting` | — | **not applied.** The move fires as before and the banner appends `follow-up date not applied (quote closed)` / `(requires quoting)` |
+| plain, post lane | `reschedule` | required |
+| plain, pre lane | `callback_requested`, reason `Follow-up set from EOD log` | required |
+
+The EOD 2 signal still yields when a site visit was booked in the same submit — a call that ended in a booking must not also log a no-answer attempt.
+
+`callback_time` is new on `POST /v1/callbacks`; both endpoints now parse `*_date` / `*_time` identically (Quotie's `_shared/localDateTime.ts`).
+
+**Old clients keep working.** `quotie: {type: callback | follow_up}`, `quotie_answered_callback` and `quotie_task` all still trigger the same legs across the deploy boundary; the new `quotie_follow_up` input is simply the current popup's way of saying "the box is ticked, here is the date".
 
 ## What happens when there is no quote
 
@@ -35,8 +94,8 @@ The EOD activity, the GHL pipeline move and everything else still succeed — a 
 
 | EOD step | Selection | Quotie effect |
 |---|---|---|
-| EOD 2 | Didn't Answer / Voicemail | `no_answer` — logs the attempt and pushes the follow-up out by the acting exec's own no-answer delay (in company working days). Fires even with no EOD 3 outcome; skipped when EOD 3 already owns the move |
-| EOD 3 | Not Ready Yet - Post Quote | `reschedule` — **date required**, logs a `contacted` attempt, bumps the reschedule count, sets the group to `follow_up_needed` |
+| EOD 2 | Didn't Answer / Voicemail | `no_answer` — logs the attempt and pushes the follow-up out by the acting exec's own no-answer delay (in company working days), or to the exec's own date when one is set. Fires even with no EOD 3 outcome; skipped when EOD 3 already owns the move |
+| EOD 3 | Not Ready Yet - Post Quote | `reschedule` — **date required** (defaults to tomorrow if a stale client omits it), logs a `contacted` attempt, bumps the reschedule count, sets the group to `follow_up_needed` |
 | EOD 3 | Not a Good Time to Talk | `reschedule` (same as above — **not** the pre-quote "Parked") |
 | EOD 3 | Verbal Confirmation | `verbal_yes` — flags **every** open group for the contact, card moves to Verbal Yes. Optional date also reschedules |
 | EOD 3 | Lost - * / DQ - * (12 outcomes) | `lost` — closes the primary open group as lost, `outcome_notes` from the notes box |
@@ -109,14 +168,13 @@ Companies with no `quotie_config` see zero change, and companies already on the 
 
 ## Dates and timezones
 
-`follow_up_date` goes to Quotie as bare `YYYY-MM-DD` and `follow_up_time` as `HH:MM`. Quotie reads both as a **wall clock in the company's timezone** (`companies.timezone`, default `Australia/Sydney`). This side must never compose an ISO timestamp: Vercel runs UTC, and an AU date built from server-local `Date` fields is a day out for most of the working day. Every date this code computes or formats goes through `Intl` pinned to `Australia/Sydney`.
+`follow_up_date` / `callback_date` go to Quotie as bare `YYYY-MM-DD` and `follow_up_time` / `callback_time` as `HH:MM` — **both lanes carry a time now**. Quotie reads both as a **wall clock in the company's timezone** (`companies.timezone`, default `Australia/Sydney`). This side must never compose an ISO timestamp: Vercel runs UTC, and an AU date built from server-local `Date` fields is a day out for most of the working day. Every date this code computes or formats goes through `Intl` pinned to `Australia/Sydney`.
 
 Date-only means company-local midnight, which is exactly what Quotie's own browser UI stores and what its reminder banner reads back as "no time set" — so the success banner prints a bare date for midnight and `18 Sep 14:30` when a real time was set.
 
 ## What is deliberately excluded
 
 - **Won.** Covered by the `Job won` event type.
-- **A time picker in the pre-quote lane.** `callback_date` stays date-only for now; api-callbacks' cadence works in whole days.
 - **`quote_group_id`.** The endpoint accepts one, but the popup only knows the GHL contact — Quotie picks the most urgent open group (ordered by follow-up date, nulls last, then newest send). `lost` / `abandoned` close only that primary group and report the rest as `other_open_groups`, which the banner surfaces as "N other open quotes untouched" so the exec knows to check.
 
 ## Testing safety (unchanged rules)
@@ -124,6 +182,16 @@ Date-only means company-local midnight, which is exactly what Quotie's own brows
 - **Never test against real leads** — dev and prod share LIVE GHL locations. Lachlan Boys / Buzz Brady test contacts only.
 - `api-follow-ups` makes **no GHL writes** beyond the shared contact import (a 5s GET for an unknown contact), so it is as safe to smoke as `api-callbacks` — but unlike `api-callbacks` it **closes real quote groups** on `lost` / `abandoned`. Smoke those two against a throwaway quote only.
 - Nothing here has been run against Quotie prod or dev from this repo yet.
+
+## Verification
+
+```bash
+npm test                                   # resolver assertions (repo root, node --test)
+cd dashboard && pnpm exec tsc --noEmit     # typecheck
+cd dashboard && pnpm build                 # what Vercel runs
+```
+
+`src/scripts/quotieResolver.test.mts` pins the pure rules: lane selection, both lanes' outcome maps, the lane-separation rule, the safe client projection, the one-call precedence and the date-merge table above. It runs under `node --experimental-strip-types`, importing `quotie.ts` directly — no build step, no network.
 
 ## References (Quotie repo)
 
