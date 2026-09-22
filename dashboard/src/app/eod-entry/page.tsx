@@ -23,7 +23,7 @@ import {
 } from "./data";
 import { MeView, TabBar, TodayView } from "./views";
 import { EodEntryForm } from "./EodEntryForm";
-import { safeQuotieClientConfig, type QuotieConfig } from "./quotie";
+import { getQuotieFollowUpState, safeQuotieClientConfig, type QuotieConfig } from "./quotie";
 // Force dark even if THEME_BOOT already ran (dashboard cookie is light).
 const EOD_THEME_BOOT = `(function(){try{var r=document.documentElement;r.classList.add("dark");r.style.colorScheme="dark";}catch(e){}})();`;
 
@@ -124,7 +124,13 @@ export default async function EodEntryPage({
     const people = await peoplePromise;
     const ghlLocationId = location || (company.ghl_location_id as string) || "";
 
-    const [options, history, ghl, pendingVisits] = await Promise.all([
+    // What Quotie already has scheduled for this contact — read-only, 4s
+    // guarded, and only worth asking for when the integration is on and we
+    // know which contact we are looking at.
+    const quotieConfig = company.quotie_config as QuotieConfig | null | undefined;
+    const quotieFollowUpAsked = !!quotieConfig?.api_key && !!cId;
+
+    const [options, history, ghl, pendingVisits, quotieFollowUp] = await Promise.all([
       optionsPromise,
       historyPromise,
       fetchGhlContact(ghlLocationId, cId, people),
@@ -135,6 +141,7 @@ export default async function EodEntryPage({
         pageContactName: scraped || undefined,
         people,
       }),
+      quotieFollowUpAsked ? getQuotieFollowUpState(quotieConfig, cId) : Promise.resolve(null),
     ]);
     // Name precedence: GHL API (authoritative, needs a location token) →
     // DB name for a known contact → the extension's DOM scrape (fragile,
@@ -154,7 +161,10 @@ export default async function EodEntryPage({
     const quotieClient = safeQuotieClientConfig(company.quotie_config);
     // Feature flag for the always-available task checkbox: the projection is
     // empty both for "no api_key" and "no mapped outcomes", so derive separately.
-    const quotieEnabled = !!(company.quotie_config as QuotieConfig | null | undefined)?.api_key;
+    const quotieEnabled = !!quotieConfig?.api_key;
+    // Null state has two meanings the form words differently: we asked and
+    // could not reach Quotie, vs. we never asked (integration off / no contact).
+    const quotieFollowUpFailed = quotieFollowUpAsked && quotieFollowUp === null;
     content = (
       <EodEntryForm
         token={token}
@@ -174,6 +184,8 @@ export default async function EodEntryPage({
         pendingSiteVisits={pendingVisits}
         quotieClient={quotieClient}
         quotieEnabled={quotieEnabled}
+        quotieFollowUp={quotieFollowUp}
+        quotieFollowUpFailed={quotieFollowUpFailed}
       />
     );
   }

@@ -29,12 +29,15 @@ import {
   createQuotieFollowUp,
   createQuotieSiteVisit,
   createQuotieTask,
+  followUpDateToSend,
+  getQuotieFollowUpState,
   getQuotieTeamMembers,
-  resolveAnsweredForLane,
+  resolveFollowUpPlan,
   resolveLane,
   resolveQuotieActionForLane,
   type QuotieCallResult,
   type QuotieConfig,
+  type QuotieFollowUpState,
   type QuotieLane,
   type QuotieTeamMember,
 } from "./quotie";
@@ -103,11 +106,40 @@ export type EodEntryInput = {
     notes?: string;
   };
   /**
+   * The sticky-bar "Set follow-up" checkbox. Presence = ticked; the fields are
+   * the exec's chosen next-touch date.
+   *
+   * This NEVER adds a second Quotie call. When the EOD 3 outcome (or the EOD 2
+   * no-answer signal) already drives a pipeline move in this lane, the date is
+   * merged INTO that call — a post-quote move takes follow_up_date/time, a
+   * pre-quote move takes callback_date/time. With no outcome-driven move it is
+   * the whole leg: reschedule (post) / callback_requested (pre).
+   *
+   * `date` is YYYY-MM-DD and `time` HH:MM, both read by Quotie as a wall clock
+   * in the COMPANY's timezone — never an ISO timestamp (Vercel runs UTC).
+   */
+  quotie_follow_up?: {
+    date?: string;
+    time?: string;
+    notes?: string;
+  };
+  /**
    * Which Quotie lane this log drives (the form's Pre-quote / Post-quote
    * toggle). Absent → the server derives it from eod_fields.stage. Anything
    * else than the two known values is ignored and re-derived.
    */
   quotie_lane?: QuotieLane;
+};
+
+/**
+ * One Quotie call's outcome. A submit can now run up to three independent
+ * legs — the site-visit booking, the follow-up / pipeline move, and the task —
+ * so the banner reports them on their own lines instead of one joined string.
+ */
+export type QuotieLeg = {
+  kind: "visit" | "follow_up" | "task";
+  ok: boolean;
+  detail?: string;
 };
 
 export type EodEntryResult =
@@ -116,7 +148,11 @@ export type EodEntryResult =
       count: number;
       pipeline?: string;
       pipelineOk?: boolean; // pipeline: what happened ("moved to X") or a skip/fail reason
-      quotie_result?: { ok: boolean; detail?: string };
+      /**
+       * `ok` / `detail` stay the flattened single-line form older popup builds
+       * render; `legs` is the per-call breakdown the current form uses.
+       */
+      quotie_result?: { ok: boolean; detail?: string; legs?: QuotieLeg[] };
     }
   | { ok: false; error: string };
 
@@ -247,26 +283,59 @@ function formatFollowUpDate(raw: string | null | undefined): string {
   }
 }
 
+/** 1 → "1st follow-up", 2 → "2nd follow-up"; nothing below 1. */
+function followUpOrdinal(count: number): string | null {
+  if (!Number.isFinite(count) || count < 1) return null;
+  const n = Math.floor(count);
+  const tens = n % 100;
+  const suffix =
+    tens >= 11 && tens <= 13 ? "th"
+    : n % 10 === 1 ? "st"
+    : n % 10 === 2 ? "nd"
+    : n % 10 === 3 ? "rd"
+    : "th";
+  return `${n}${suffix} follow-up`;
+}
+
 /** Human success detail for an api-follow-ups call (post-quote lane banner). */
 function followUpDetailFor(outcome: string, res: QuotieCallResult): string | undefined {
   const when = formatFollowUpDate(res.follow_up?.follow_up_date);
+  // The banner line already says "Follow-up set in Quotie", so the detail
+  // leads with the date rather than repeating the word.
   const label =
     outcome === "reschedule"
-      ? `Follow-up: rescheduled${when ? ` to ${when}` : ""}`
+      ? (when || "rescheduled")
       : outcome === "no_answer"
-        ? `Follow-up: no answer logged${when ? `, next ${when}` : ""}`
-        : outcome === "verbal_yes" ? "Follow-up: marked verbal yes"
-        : outcome === "hot" ? "Follow-up: marked hot"
-        : outcome === "lost" ? "Follow-up: quote marked lost"
-        : outcome === "abandoned" ? "Follow-up: quote abandoned"
+        ? `No answer logged${when ? `, next ${when}` : ""}`
+        : outcome === "verbal_yes" ? "Marked verbal yes"
+        : outcome === "hot" ? "Marked hot"
+        : outcome === "lost" ? "Quote marked lost"
+        : outcome === "abandoned" ? "Quote abandoned"
         : "Follow-up updated";
 
   const parts = [label];
+  // Only the rescheduling outcomes advance the count, so it reads as the
+  // follow-up the exec just scheduled rather than a bare number.
+  const ordinal =
+    outcome === "reschedule" || outcome === "no_answer"
+      ? followUpOrdinal(res.follow_up?.reschedule_count ?? 0)
+      : null;
+  if (ordinal) parts.push(ordinal);
   if (res.follow_up?.group_name) parts.push(res.follow_up.group_name);
   const others = res.follow_up?.other_open_groups ?? 0;
   if (others > 0) parts.push(`${others} other open quote${others === 1 ? "" : "s"} untouched`);
   if (res.warnings?.length) parts.push(res.warnings.join("; "));
   return parts.join(" · ");
+}
+
+/** Accept only the company-local wall-clock shapes Quotie parses. */
+function localDateOrEmpty(raw: string | undefined): string {
+  const s = (raw || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : "";
+}
+function localTimeOrEmpty(raw: string | undefined): string {
+  const s = (raw || "").trim();
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(s) ? s : "";
 }
 
 /** Failure detail for an api-follow-ups call — 404 gets the lane hint. */
@@ -954,11 +1023,13 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
       || (attempted === 0 ? "no linked GHL contact" : "opportunity not updated");
   }
 
-  // Quotie push — the site visit fires from the outcome mapping (unchanged);
-  // the task fires independently from quotie_task (no outcome required). A
-  // Quotie failure must NEVER fail the EOD submit, so every path here folds
+  // Quotie push — up to three independent legs:
+  //   visit      — the site-visit booking, still driven by the EOD 3 outcome
+  //   follow-up  — the pipeline move / next-touch date ("Set follow-up")
+  //   task       — a plain Quotie task ("Quotie task"), outcome-independent
+  // A Quotie failure must NEVER fail the EOD submit, so every path here folds
   // into quotie_result and swallows its own errors.
-  let quotie_result: { ok: boolean; detail?: string } | undefined;
+  let quotie_result: { ok: boolean; detail?: string; legs?: QuotieLeg[] } | undefined;
   const quotieConfig = company.quotie_config as QuotieConfig | null | undefined;
 
   // Contact context: prefer the item that resolved to a GHL contact id.
@@ -975,15 +1046,21 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
       ? input.quotie_lane
       : resolveLane(input.eod_fields?.stage || "", quotieConfig);
 
-  // ── Site-visit path (outcome-gated, unchanged semantics) ──────────────
+  // Shared EOD context for every Quotie leg below.
+  const isEodLog = input.event_type === "eod_update" && !!input.eod_fields;
+  const stdOutcome = input.eod_fields?.std_outcome || "";
+
+  // ── Site-visit leg (outcome-gated, unchanged semantics) ───────────────
+  // Only the site-visit and legacy-task shapes come through `quotie` now; the
+  // pipeline shapes (callback / follow_up) are handled by the follow-up leg
+  // below so the exec's date can be merged into the same call.
   let visitRes: { ok: boolean; detail?: string } | null = null;
   if (
     input.quotie &&
-    input.event_type === "eod_update" &&
-    input.eod_fields &&
+    (input.quotie.type === "site_visit" || input.quotie.type === "task") &&
+    isEodLog &&
     quotieConfig?.api_key
   ) {
-    const stdOutcome = input.eod_fields.std_outcome || "";
     // NEVER trust the client's `type` — re-resolve server-side, in this lane.
     const action = resolveQuotieActionForLane(stdOutcome, lane, quotieConfig);
     if (!action) {
@@ -991,47 +1068,6 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
     } else if (action.type !== input.quotie.type) {
       // Client/server disagree (config changed mid-session) — skip, don't guess.
       visitRes = { ok: false, detail: "Quotie action changed — reload and retry" };
-    } else if (action.type === "callback") {
-      // Pipeline callback — moves the Quotie lead into the matching column.
-      // notes carries the free-text EOD detail; the label is outcome-specific.
-      const outcome = action.outcome || "requires_quoting";
-      const res = await createQuotieCallback(quotieConfig, {
-        outcome,
-        ghl_contact_id: quotieGhlContactId,
-        notes: input.quotie.notes,
-        salesPersonName,
-        assign_to: action.assign_to,
-        callback_reason: callbackReasonFor(outcome, stdOutcome),
-        callback_date: outcome === "callback_requested" ? input.quotie.callback_date : undefined,
-      });
-      if (res.ok) {
-        visitRes = { ok: true, detail: callbackDetailFor(outcome, res.noop, res.warnings) };
-      } else {
-        visitRes = { ok: false, detail: res.error };
-      }
-    } else if (action.type === "follow_up") {
-      // Post-quote lane — acts on the contact's most urgent open SENT quote
-      // group. A contact with no sent quote comes back 404 no_quote_group; the
-      // detail tells the exec to flip the toggle to Pre-quote.
-      const outcome = action.outcome || "reschedule";
-      // A reschedule needs a date; the form requires one, but a stale client
-      // (or an override that turns another outcome into a reschedule) might not
-      // send it — default to tomorrow, company-local, never server-local.
-      const followUpDate =
-        input.quotie.follow_up_date?.trim() ||
-        (outcome === "reschedule" ? isoInDaysTz(1) : undefined);
-      const res = await createQuotieFollowUp(quotieConfig, {
-        outcome,
-        ghl_contact_id: quotieGhlContactId,
-        notes: input.quotie.notes,
-        salesPersonName,
-        assign_to: action.assign_to,
-        follow_up_date: followUpDate,
-        follow_up_time: input.quotie.follow_up_time,
-      });
-      visitRes = res.ok
-        ? { ok: true, detail: followUpDetailFor(outcome, res) }
-        : { ok: false, detail: followUpFailureDetail(res) };
     } else if (action.type === "site_visit") {
       // EOD-3 "Book Site Visit": route through the shared booking handler so
       // this path does everything the pending-banner path does — previously it
@@ -1112,49 +1148,97 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
     }
   }
 
-  // ── EOD 2 no-answer path (Answered? step, independent of EOD 3) ───────
-  // The no-answer / voicemail signal lives on EOD 2, so it fires even with no
-  // EOD 3 outcome. Skipped when the EOD 3 outcome already resolved to its own
-  // callback action above (never double-post the same contact). Re-resolved
-  // server-side from eod_fields — the client only requests it via a flag.
-  if (
-    !visitRes &&
-    input.quotie_answered_callback &&
-    input.event_type === "eod_update" &&
-    input.eod_fields &&
-    quotieConfig?.api_key
-  ) {
-    const outcomeAction = resolveQuotieActionForLane(
-      input.eod_fields.std_outcome || "",
+  // ── Follow-up leg (the "Set follow-up" checkbox) ──────────────────────
+  // ONE call, whatever drove it: the EOD 3 outcome's pipeline move, the EOD 2
+  // no-answer signal, or a plain date set. The exec's date/time is merged into
+  // that call rather than posted as a second one (see resolveFollowUpPlan).
+  //
+  // Inputs that mean "the box is ticked":
+  //   quotie_follow_up                      — current client (carries the date)
+  //   quotie.type callback | follow_up      — older client, outcome-driven move
+  //   quotie_answered_callback              — older client, EOD 2 signal
+  // The outcome itself is ALWAYS re-resolved here; the client never picks it.
+  let followUpRes: { ok: boolean; detail?: string } | null = null;
+  if (isEodLog && quotieConfig?.api_key) {
+    const fu = input.quotie_follow_up;
+    const legacyMove =
+      input.quotie?.type === "callback" || input.quotie?.type === "follow_up";
+    const plan = resolveFollowUpPlan({
       lane,
-      quotieConfig,
-    );
-    // Skip when the EOD 3 outcome already owns this contact's pipeline move in
-    // this lane — never double-post the same contact.
-    const eod3Owns = outcomeAction?.type === "callback" || outcomeAction?.type === "follow_up";
-    const answered = resolveAnsweredForLane(input.eod_fields.answered || "", lane, quotieConfig);
-    if (answered && !eod3Owns) {
-      if (answered.kind === "follow_up") {
-        const res = await createQuotieFollowUp(quotieConfig, {
-          outcome: answered.outcome,
-          ghl_contact_id: quotieGhlContactId,
-          notes: input.quotie_answered_callback.notes,
-          salesPersonName,
-        });
-        visitRes = res.ok
-          ? { ok: true, detail: followUpDetailFor(answered.outcome, res) }
-          : { ok: false, detail: followUpFailureDetail(res) };
+      stdOutcome,
+      answered: input.eod_fields?.answered || "",
+      config: quotieConfig,
+      followUpRequested: !!fu || legacyMove || !!input.quotie_answered_callback,
+    });
+    // The EOD 2 signal has always yielded when another outcome-driven leg
+    // already moved this contact (today: a booked site visit) — never log a
+    // no-answer attempt against a call that ended in a booking.
+    const suppressedByVisit = plan?.source === "eod2" && !!visitRes;
+
+    if (plan && !suppressedByVisit) {
+      if (legacyMove && plan.source === "eod3" && plan.kind !== input.quotie?.type) {
+        // Client/server disagree (config changed mid-session) — skip, don't guess.
+        followUpRes = { ok: false, detail: "Quotie action changed — reload and retry" };
       } else {
-        const res = await createQuotieCallback(quotieConfig, {
-          outcome: answered.outcome,
-          ghl_contact_id: quotieGhlContactId,
-          notes: input.quotie_answered_callback.notes,
-          salesPersonName,
-          callback_reason: callbackReasonFor(answered.outcome, input.eod_fields.std_outcome || ""),
-        });
-        visitRes = res.ok
-          ? { ok: true, detail: callbackDetailFor(answered.outcome, res.noop, res.warnings) }
-          : { ok: false, detail: res.error };
+        // Date precedence: the checkbox's picker, then the older client's
+        // per-shape field. Both are company-local wall clocks, never ISO.
+        const legacyDate =
+          (plan.kind === "follow_up" ? input.quotie?.follow_up_date : input.quotie?.callback_date)
+            ?.trim() || "";
+        const askedDate = localDateOrEmpty(fu?.date) || legacyDate;
+        const askedTime = localTimeOrEmpty(fu?.time) || localTimeOrEmpty(input.quotie?.follow_up_time);
+        // A reschedule (and any plain "set a follow-up") has to say WHEN. The
+        // form requires it, but a stale client might not send one — default to
+        // tomorrow, company-local, never server-local.
+        const sendDate = followUpDateToSend(plan, askedDate, isoInDaysTz(1));
+        // Terminal outcomes close the record, so a date has nowhere to land.
+        const droppedDate = !plan.acceptsDate && !!askedDate;
+        const dropNote = droppedDate
+          ? `follow-up date not applied (${plan.dateSkipReason})`
+          : "";
+        const withDrop = (detail: string | undefined) =>
+          [detail, dropNote].filter(Boolean).join(" · ") || undefined;
+        const notes =
+          fu?.notes?.trim() ||
+          input.quotie?.notes?.trim() ||
+          input.quotie_answered_callback?.notes?.trim() ||
+          undefined;
+
+        if (plan.kind === "follow_up") {
+          // Post-quote lane — acts on the contact's most urgent open SENT quote
+          // group. A contact with no sent quote comes back 404 no_quote_group;
+          // the detail tells the exec to flip the toggle to Pre-quote.
+          const res = await createQuotieFollowUp(quotieConfig, {
+            outcome: plan.outcome,
+            ghl_contact_id: quotieGhlContactId,
+            notes,
+            salesPersonName,
+            assign_to: plan.assign_to,
+            follow_up_date: sendDate || undefined,
+            follow_up_time: sendDate ? (askedTime || undefined) : undefined,
+          });
+          followUpRes = res.ok
+            ? { ok: true, detail: withDrop(followUpDetailFor(plan.outcome, res)) }
+            : { ok: false, detail: followUpFailureDetail(res) };
+        } else {
+          // Pre-quote lane — moves the Quotie lead into the matching column.
+          const res = await createQuotieCallback(quotieConfig, {
+            outcome: plan.outcome,
+            ghl_contact_id: quotieGhlContactId,
+            notes,
+            salesPersonName,
+            assign_to: plan.assign_to,
+            callback_reason:
+              plan.source === "plain"
+                ? "Follow-up set from EOD log"
+                : callbackReasonFor(plan.outcome, stdOutcome),
+            callback_date: sendDate || undefined,
+            callback_time: sendDate ? (askedTime || undefined) : undefined,
+          });
+          followUpRes = res.ok
+            ? { ok: true, detail: withDrop(callbackDetailFor(plan.outcome, res.noop, res.warnings)) }
+            : { ok: false, detail: res.error };
+        }
       }
     }
   }
@@ -1184,16 +1268,29 @@ export async function submitEodEntry(input: EodEntryInput): Promise<EodEntryResu
   }
 
   // ── Combine results ───────────────────────────────────────────────────
-  if (visitRes && taskRes) {
-    const parts = [
-      visitRes.detail ? `visit: ${visitRes.detail}` : "",
-      taskRes.detail ? `task: ${taskRes.detail}` : "",
-    ].filter(Boolean);
-    quotie_result = { ok: visitRes.ok && taskRes.ok, detail: parts.join("; ") || undefined };
-  } else if (visitRes) {
-    quotie_result = visitRes;
-  } else if (taskRes) {
-    quotie_result = taskRes;
+  // Up to three legs now. The current form renders `legs` one line each; the
+  // flattened detail keeps older builds (and the Slack-less single-leg case)
+  // reading exactly as they did.
+  const legs: QuotieLeg[] = [];
+  if (visitRes) legs.push({ kind: "visit", ...visitRes });
+  if (followUpRes) legs.push({ kind: "follow_up", ...followUpRes });
+  if (taskRes) legs.push({ kind: "task", ...taskRes });
+  if (legs.length === 1) {
+    quotie_result = { ok: legs[0].ok, detail: legs[0].detail, legs };
+  } else if (legs.length > 1) {
+    const LABEL: Record<QuotieLeg["kind"], string> = {
+      visit: "visit",
+      follow_up: "follow-up",
+      task: "task",
+    };
+    const parts = legs
+      .map(l => (l.detail ? `${LABEL[l.kind]}: ${l.detail}` : ""))
+      .filter(Boolean);
+    quotie_result = {
+      ok: legs.every(l => l.ok),
+      detail: parts.join("; ") || undefined,
+      legs,
+    };
   }
 
   return { ...posted, pipeline, pipelineOk, quotie_result };
@@ -1248,5 +1345,47 @@ export async function fetchQuotieTeamMembers(input: {
     return { ok: true, members, defaults };
   } catch {
     return { ok: false, members: [], defaults: {} };
+  }
+}
+
+/**
+ * Re-read Quotie's follow-up / callback state for a contact after a submit, so
+ * the popup's "In Quotie: …" line reflects the move that just landed without a
+ * page reload. Same token → company resolution as fetchQuotieTeamMembers.
+ *
+ * Never throws. `ok: false` means we could not reach Quotie (the form shows
+ * "Couldn't reach Quotie"); `ok: true` with a null state means the integration
+ * is off or there is no contact to look up. The payload carries names only —
+ * no auth ids — so it is safe to hand to the browser as-is.
+ */
+export async function fetchQuotieFollowUpState(input: {
+  token: string;
+  ghl_location_id?: string;
+  ghl_contact_id?: string;
+}): Promise<{ ok: boolean; state: QuotieFollowUpState | null }> {
+  try {
+    const slug = verifyEodEntryToken(input.token || "");
+    if (!slug) return { ok: true, state: null };
+    const contactId = (input.ghl_contact_id || "").trim();
+    if (!contactId) return { ok: true, state: null };
+
+    const supabase = createAdminClient();
+    let query = supabase.from("companies").select("id, active, quotie_config");
+    if (slug === "agency") {
+      if (!input.ghl_location_id) return { ok: true, state: null };
+      query = query.eq("ghl_location_id", input.ghl_location_id);
+    } else {
+      query = query.eq("slug", slug);
+    }
+    const { data: company } = await query.single();
+    if (!company || !company.active) return { ok: true, state: null };
+
+    const config = company.quotie_config as QuotieConfig | null | undefined;
+    if (!config?.api_key) return { ok: true, state: null };
+
+    const state = await getQuotieFollowUpState(config, contactId);
+    return { ok: state !== null, state };
+  } catch {
+    return { ok: false, state: null };
   }
 }

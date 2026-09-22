@@ -307,6 +307,114 @@ export function resolveAnsweredForLane(
   return preset ? { kind: "follow_up", outcome: preset } : null;
 }
 
+/**
+ * Outcomes that close (or re-open) the record rather than schedule the next
+ * touch, so a follow-up date has nowhere to land. The move still fires; the
+ * banner says why the date was dropped.
+ */
+export const FOLLOW_UP_DATE_BLOCKED: Record<string, "quote closed" | "requires quoting"> = {
+  lost: "quote closed",
+  abandoned: "quote closed",
+  requires_quoting: "requires quoting",
+};
+
+/**
+ * The ONE Quotie pipeline call the "Set follow-up" checkbox drives, whatever
+ * drove it. Exactly one of these fires per submit — never an outcome move AND
+ * a separate date-setting call for the same contact.
+ */
+export type QuotieFollowUpPlan = {
+  /** Endpoint: api-follow-ups (post-quote) or api-callbacks (pre-quote). */
+  kind: "follow_up" | "callback";
+  /** Endpoint outcome. */
+  outcome: string;
+  /**
+   * What selected this call:
+   *   eod3  — the EOD 3 standard outcome maps to a pipeline move in this lane
+   *   eod2  — the EOD 2 "Answered?" no-answer / voicemail signal
+   *   plain — no outcome-driven move; the exec just ticked "Set follow-up"
+   */
+  source: "eod3" | "eod2" | "plain";
+  /** Whether the exec's date/time may be merged into this call. */
+  acceptsDate: boolean;
+  /** Why a supplied date could not be applied (banner suffix). */
+  dateSkipReason?: "quote closed" | "requires quoting";
+  /** Assignee override carried through from the EOD 3 action. */
+  assign_to?: string;
+};
+
+/**
+ * Resolve the single follow-up leg for a submit. Pure — the server calls this
+ * with the re-derived lane and the config, and the assertion suite pins the
+ * merge rules (see scripts/quotieResolver.test.mts).
+ *
+ * Precedence: an EOD 3 outcome that maps to a pipeline move owns the call; then
+ * the EOD 2 no-answer signal; then, only when the exec ticked the box, a plain
+ * reschedule (post) / call-back request (pre). Terminal outcomes still fire,
+ * they just refuse the date.
+ */
+export function resolveFollowUpPlan(args: {
+  lane: QuotieLane;
+  stdOutcome: string;
+  answered: string;
+  config: QuotieConfig | null | undefined;
+  /** "Set follow-up" is ticked (or a legacy client sent an equivalent input). */
+  followUpRequested: boolean;
+}): QuotieFollowUpPlan | null {
+  const { lane, stdOutcome, answered, config, followUpRequested } = args;
+  if (!config?.api_key) return null;
+
+  const plan = (
+    kind: "follow_up" | "callback",
+    outcome: string,
+    source: QuotieFollowUpPlan["source"],
+    assign_to?: string,
+  ): QuotieFollowUpPlan => {
+    const blocked = FOLLOW_UP_DATE_BLOCKED[outcome];
+    return {
+      kind,
+      outcome,
+      source,
+      acceptsDate: !blocked,
+      ...(blocked ? { dateSkipReason: blocked } : {}),
+      ...(assign_to ? { assign_to } : {}),
+    };
+  };
+
+  const action = resolveQuotieActionForLane(stdOutcome, lane, config);
+  if (action && (action.type === "callback" || action.type === "follow_up")) {
+    const fallback = action.type === "follow_up" ? "reschedule" : "requires_quoting";
+    return plan(action.type, action.outcome || fallback, "eod3", action.assign_to);
+  }
+
+  const eod2 = resolveAnsweredForLane(answered, lane, config);
+  if (eod2) return plan(eod2.kind, eod2.outcome, "eod2");
+
+  if (!followUpRequested) return null;
+  return lane === "post_quote"
+    ? plan("follow_up", "reschedule", "plain")
+    : plan("callback", "callback_requested", "plain");
+}
+
+/**
+ * The date actually sent with a plan.
+ *   - a terminal outcome takes none (the record is closing)
+ *   - the exec's date wins whenever the plan accepts one
+ *   - a reschedule, and any plain "set a follow-up", must say WHEN, so a
+ *     missing date falls back to `defaultDate` (tomorrow, company-local)
+ *   - everything else (no-answer cadence, verbal yes, hot) is happy with none
+ *     and lets Quotie compute its own next date
+ */
+export function followUpDateToSend(
+  plan: QuotieFollowUpPlan,
+  askedDate: string,
+  defaultDate: string,
+): string {
+  if (!plan.acceptsDate) return "";
+  if (askedDate) return askedDate;
+  return plan.outcome === "reschedule" || plan.source === "plain" ? defaultDate : "";
+}
+
 /** Per-outcome shape the browser gets. `outcome` is not secret — the form needs
  *  it to decide whether to show a follow-up date picker. */
 export type QuotieClientAction = { type: QuotieActionType; outcome?: string };
@@ -377,6 +485,181 @@ export function safeQuotieClientConfig(
 }
 
 const QUOTIE_TIMEOUT_MS = 10_000;
+/**
+ * The popup-open read is on the page's critical path (it runs inside the same
+ * Promise.all as the GHL contact fetch), so it gets a much tighter guard than
+ * the write calls: a slow Quotie must never hold the form back. A miss just
+ * renders "Couldn't reach Quotie".
+ */
+const QUOTIE_READ_TIMEOUT_MS = 4_000;
+
+/** A Quotie timestamptz rendered as a company-local wall clock. `time` is null at midnight. */
+export type QuotieLocalWallClock = { date: string; time: string | null };
+
+/**
+ * GET /api-follow-ups/contact — what Quotie already knows about this GHL
+ * contact when the popup opens. Side-effect free on Quotie's side (no contact
+ * import, no attempt rows) and carries NO auth ids, so the whole shape is safe
+ * to hand straight to the browser.
+ */
+export type QuotieFollowUpState = {
+  contact: { id: string; first_name: string | null; last_name: string | null } | null;
+  /** Which lane Quotie itself says this contact is in — post_quote wins when a sent quote is open. */
+  lane: QuotieLane;
+  timezone: string;
+  post_quote: {
+    group_id: string;
+    group_name: string | null;
+    status: string | null;
+    follow_up_date: string | null;
+    follow_up_local: QuotieLocalWallClock | null;
+    reschedule_count: number;
+    follow_up_notes: string | null;
+    assigned_to_name: string | null;
+    is_hot: boolean;
+    verbal_confirmed_at: string | null;
+    sent_at: string | null;
+    expires_at: string | null;
+    pipeline_value: number | null;
+    other_open_groups: number;
+  } | null;
+  pre_quote: {
+    lead_id: string;
+    status: string | null;
+    callback_date: string | null;
+    callback_local: QuotieLocalWallClock | null;
+    attempt_count: number;
+    callback_reason: string | null;
+    assigned_to_name: string | null;
+  } | null;
+};
+
+function str(v: unknown): string | null {
+  return typeof v === "string" && v.trim() ? v : v == null ? null : String(v) || null;
+}
+function num(v: unknown, fallback = 0): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+function wallClock(v: unknown): QuotieLocalWallClock | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as { date?: unknown; time?: unknown };
+  const date = typeof o.date === "string" ? o.date.trim() : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const time = typeof o.time === "string" && /^\d{2}:\d{2}/.test(o.time.trim())
+    ? o.time.trim().slice(0, 5)
+    : null;
+  return { date, time };
+}
+
+/**
+ * Read Quotie's current follow-up / callback state for a GHL contact so the
+ * popup can show what is already scheduled before the exec logs anything.
+ * Never throws and never blocks: any failure (not configured, 404, timeout,
+ * malformed body) returns null and the form falls back to the stage-derived
+ * lane with a "couldn't reach Quotie" line.
+ */
+export async function getQuotieFollowUpState(
+  config: QuotieConfig | null | undefined,
+  ghlContactId: string,
+): Promise<QuotieFollowUpState | null> {
+  const apiUrl = (config?.api_url || "").trim().replace(/\/+$/, "");
+  const apiKey = (config?.api_key || "").trim();
+  const contactId = (ghlContactId || "").trim();
+  if (!apiUrl || !apiKey || !contactId) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), QUOTIE_READ_TIMEOUT_MS);
+  try {
+    const res = await fetch(
+      `${apiUrl}/api-follow-ups/contact?ghl_contact_id=${encodeURIComponent(contactId)}`,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        cache: "no-store",
+        signal: controller.signal,
+      },
+    );
+    if (!res.ok) return null;
+    const text = await res.text().catch(() => "");
+    const parsed: unknown = text ? JSON.parse(text) : null;
+    if (!parsed || typeof parsed !== "object") return null;
+    // Quotie returns its payload bare (top-level), same as the other routes.
+    const p = parsed as Record<string, unknown>;
+
+    const rawContact = p.contact;
+    const contact =
+      rawContact && typeof rawContact === "object"
+        ? {
+            id: String((rawContact as { id?: unknown }).id || ""),
+            first_name: str((rawContact as { first_name?: unknown }).first_name),
+            last_name: str((rawContact as { last_name?: unknown }).last_name),
+          }
+        : null;
+
+    const rawPost = p.post_quote;
+    const post_quote =
+      rawPost && typeof rawPost === "object"
+        ? (() => {
+            const g = rawPost as Record<string, unknown>;
+            return {
+              group_id: String(g.group_id || ""),
+              group_name: str(g.group_name),
+              status: str(g.status),
+              follow_up_date: str(g.follow_up_date),
+              follow_up_local: wallClock(g.follow_up_local),
+              reschedule_count: num(g.reschedule_count),
+              follow_up_notes: str(g.follow_up_notes),
+              assigned_to_name: str(g.assigned_to_name),
+              is_hot: g.is_hot === true,
+              verbal_confirmed_at: str(g.verbal_confirmed_at),
+              sent_at: str(g.sent_at),
+              expires_at: str(g.expires_at),
+              pipeline_value: typeof g.pipeline_value === "number" ? g.pipeline_value : null,
+              other_open_groups: num(g.other_open_groups),
+            };
+          })()
+        : null;
+
+    const rawPre = p.pre_quote;
+    const pre_quote =
+      rawPre && typeof rawPre === "object"
+        ? (() => {
+            const l = rawPre as Record<string, unknown>;
+            return {
+              lead_id: String(l.lead_id || ""),
+              status: str(l.status),
+              callback_date: str(l.callback_date),
+              callback_local: wallClock(l.callback_local),
+              attempt_count: num(l.attempt_count),
+              callback_reason: str(l.callback_reason),
+              assigned_to_name: str(l.assigned_to_name),
+            };
+          })()
+        : null;
+
+    // Trust Quotie's lane when it sends a known one; otherwise derive it the
+    // same way Quotie does (an open sent quote group means post-quote).
+    const lane: QuotieLane =
+      p.lane === "post_quote" || p.lane === "pre_quote"
+        ? p.lane
+        : post_quote
+          ? "post_quote"
+          : "pre_quote";
+
+    return {
+      contact,
+      lane,
+      timezone: (typeof p.timezone === "string" && p.timezone) || "Australia/Sydney",
+      post_quote,
+      pre_quote,
+    };
+  } catch {
+    // Timeout, network error, non-JSON body — the caller renders the fallback.
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export type QuotieCallResult = {
   ok: boolean;
@@ -389,6 +672,8 @@ export type QuotieCallResult = {
     follow_up_date: string | null;
     group_name: string | null;
     status: string | null;
+    /** quote_groups.follow_up_reschedule_count after the write — "3rd follow-up" in the banner. */
+    reschedule_count: number;
     other_open_groups: number;
   };
   /** api-follow-ups 404 reason=no_quote_group — contact has no sent quote in Quotie. */
@@ -424,8 +709,14 @@ type QuotieCallbackInput = {
   /** Explicit assignee (auth_id) — wins over the user_map lookup. */
   assign_to?: string;
   callback_reason?: string;
-  /** ISO date/time — when to call back (callback_requested). */
+  /**
+   * YYYY-MM-DD, read by Quotie as a wall clock in the COMPANY's timezone —
+   * same parsing as follow_up_date since the two endpoints share
+   * _shared/localDateTime.ts. Never compose an ISO timestamp on this side.
+   */
   callback_date?: string;
+  /** HH:MM, company-local, paired with callback_date. */
+  callback_time?: string;
 };
 
 type QuotieFollowUpInput = {
@@ -646,6 +937,10 @@ async function postQuotie(
             follow_up_date: typeof p.follow_up_date === "string" ? p.follow_up_date : null,
             group_name: typeof p.group_name === "string" ? p.group_name : null,
             status: typeof p.status === "string" ? p.status : null,
+            reschedule_count:
+              typeof p.reschedule_count === "number" && Number.isFinite(p.reschedule_count)
+                ? p.reschedule_count
+                : 0,
             other_open_groups:
               typeof p.other_open_groups === "number" && Number.isFinite(p.other_open_groups)
                 ? p.other_open_groups
@@ -731,6 +1026,7 @@ export async function createQuotieCallback(
   const body: Record<string, unknown> = { outcome: input.outcome };
   if (input.callback_reason?.trim()) body.callback_reason = input.callback_reason.trim();
   if (input.callback_date?.trim()) body.callback_date = input.callback_date.trim();
+  if (input.callback_time?.trim()) body.callback_time = input.callback_time.trim();
   if (input.ghl_contact_id?.trim()) body.ghl_contact_id = input.ghl_contact_id.trim();
   if (input.notes?.trim()) body.notes = input.notes.trim();
   if (attempted_by) body.attempted_by = attempted_by;
