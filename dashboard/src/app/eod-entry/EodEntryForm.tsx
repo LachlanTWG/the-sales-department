@@ -462,16 +462,17 @@ export function EodEntryForm({
   const [fuStateFailed, setFuStateFailed] = useState(quotieFollowUpFailed);
 
   // ── Quotie lane ───────────────────────────────────────────────────────
-  // Quotie's own answer wins on open (it knows whether a sent quote is open);
-  // the EOD 1 stage takes over the moment the exec touches it, and the toggle
-  // (laneOverride) beats both. The override resets whenever the stage changes.
+  // Quotie's own answer is the source of truth: it is the only side that can
+  // see whether a SENT quote is still open, so it outranks the EOD 1 stage
+  // even after the exec changes the stage. The stage only picks the lane when
+  // the read was unavailable (integration off, no contact id, or it failed).
+  // The manual toggle (laneOverride) still beats both, and resets on a stage
+  // change and after a submit.
   const [laneOverride, setLaneOverride] = useState<QuotieLane | null>(null);
-  const [stageTouched, setStageTouched] = useState(false);
   const stageLane: QuotieLane = quotieClient.post_quote_stages.includes(stage.trim())
     ? "post_quote"
     : "pre_quote";
-  const lane: QuotieLane =
-    laneOverride ?? (fuState && !stageTouched ? fuState.lane : stageLane);
+  const lane: QuotieLane = laneOverride ?? (fuState ? fuState.lane : stageLane);
   useEffect(() => {
     setLaneOverride(null); // eslint-disable-line react-hooks/set-state-in-effect
   }, [stage]);
@@ -511,6 +512,18 @@ export function EodEntryForm({
    *  checkbox reads "Update Quotie" rather than "Set follow-up". */
   const followUpTerminal = NO_FOLLOW_UP_DATE_OUTCOMES.includes(moveOutcome);
   const showFollowUpDate = qfuEnabled && !followUpTerminal;
+  /**
+   * A date is only compulsory where Quotie cannot invent one: a reschedule, a
+   * call-back request, and the plain "just set a follow-up" case. The EOD 2
+   * no-answer path bumps by the exec's own delay (post) or to the next
+   * business day (pre) when left blank, so demanding a date there would tax
+   * the most common log of the day. verbal_yes / hot are optional too.
+   */
+  const followUpDateRequired =
+    showFollowUpDate &&
+    (moveOutcome === "reschedule" ||
+      moveOutcome === "callback_requested" ||
+      (!eod3Callback && !eod3FollowUp && !eod2Signal));
 
   // Date/time: Quotie's existing next touch is the default, and only when it is
   // still in the future — a stale date would quietly re-book the past. null =
@@ -877,8 +890,8 @@ export function EodEntryForm({
 
     if (eventType === "eod_update") {
       if (!answered) { setError("Tap Answered or Didn't Answer"); return; }
-      // Whenever the picker is on screen Quotie needs a date to book against.
-      if (showFollowUpDate && !qfuDate.trim()) {
+      // Only the paths where Quotie cannot pick its own next date.
+      if (followUpDateRequired && !qfuDate.trim()) {
         setError("Pick a follow-up date");
         return;
       }
@@ -1103,7 +1116,7 @@ export function EodEntryForm({
                     <button
                       key={s}
                       type="button"
-                      onClick={() => { setStage(s); setStageTouched(true); }}
+                      onClick={() => setStage(s)}
                       className={
                         stage === s
                           ? "rounded border border-sky-600 bg-sky-600/20 px-3 py-2 text-sm font-medium text-sky-300"
@@ -1411,8 +1424,15 @@ export function EodEntryForm({
 
               {showFollowUpDate && (
                 <Field
-                  label={lane === "post_quote" ? "Follow up on" : "Call back on"}
-                  hint="When to touch this contact next — Quotie reads it in the company's timezone."
+                  label={
+                    (lane === "post_quote" ? "Follow up on" : "Call back on") +
+                    (followUpDateRequired ? "" : " (optional)")
+                  }
+                  hint={
+                    followUpDateRequired
+                      ? "When to touch this contact next — Quotie reads it in the company's timezone."
+                      : "Optional — Quotie bumps by the usual delay if blank. A date here wins."
+                  }
                 >
                   <div className="mb-2 grid grid-cols-4 gap-2">
                     {[

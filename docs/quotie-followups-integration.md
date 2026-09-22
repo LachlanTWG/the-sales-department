@@ -17,7 +17,7 @@ So the popup now picks a lane, and the two never cross.
 
 **Quotie answers first.** When the popup opens it asks Quotie what it already knows about this GHL contact (`GET api-follow-ups/contact`, below). Quotie's own `lane` is the default: it is the only side that can see whether a **sent** quote is still open. A contact with one is post-quote no matter what the GHL stage says.
 
-**EOD 1 · Stage takes over the moment the exec touches it.** Stage `Post Quote Follow Up` → post-quote lane, everything else → pre-quote. Untouched, the stage only decides the lane when the Quotie read returned nothing (integration off, no contact id, or the read failed).
+**EOD 1 · Stage is the fallback, not an override.** Stage `Post Quote Follow Up` → post-quote lane, everything else → pre-quote — but only when the Quotie read returned nothing (integration off, no contact id, or the read failed). A stage change never overrules a loaded Quotie state; Quotie knows about the sent quote and the GHL stage is frequently stale.
 
 **The exec can still flip it.** The Pre-quote / Post-quote toggle now lives *inside* the follow-up panel and is visible the whole time that panel is open. Flipping it overrides both for that one submission; changing the stage resets the override, and so does a successful submit. When the chosen outcome only maps in the *other* lane, an amber hint says so — logging in the current lane just sets the follow-up date.
 
@@ -50,6 +50,7 @@ The sticky bar carries two independent checkboxes, left of "Log it". Either, bot
 | **Quotie task** | `api-tasks` only | the EOD 3 outcome maps to a `task` action |
 | **Set follow-up** | the one pipeline call (below) | the outcome or EOD 2 answer means something to Quotie in *either* lane |
 
+
 Touching either one pins it for the rest of the session. They no longer share a box: a submit can now book a site visit, move the pipeline **and** create a task, and the banner reports each leg on its own line (`✓ Site visit booked in Quotie`, `✓ Follow-up set in Quotie · 18 Sep 14:30 · 3rd follow-up`, `✓ Task created in Quotie`; failures per leg in amber).
 
 For a terminal outcome (`lost` / `abandoned` / `requires_quoting`) the follow-up checkbox reads **"Update Quotie"** instead, and the date picker is hidden — the move still fires, there is just nowhere for a date to land.
@@ -73,6 +74,8 @@ The exec's date is then merged into whichever call that is:
 | post/pre `lost` / `abandoned`, pre `requires_quoting` | — | **not applied.** The move fires as before and the banner appends `follow-up date not applied (quote closed)` / `(requires quoting)` |
 | plain, post lane | `reschedule` | required |
 | plain, pre lane | `callback_requested`, reason `Follow-up set from EOD log` | required |
+
+The picker is **required** only where Quotie cannot invent a date for itself: a `reschedule`, a `callback_requested`, and the plain set. On the EOD 2 no-answer path (and for `verbal_yes` / `hot`) it is optional — leave it blank and Quotie bumps by the usual delay; fill it in and the explicit date wins.
 
 The EOD 2 signal still yields when a site visit was booked in the same submit — a call that ended in a booking must not also log a no-answer attempt.
 
