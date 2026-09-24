@@ -34,8 +34,10 @@ export type NewActivityItem = {
   visit_kind?: "in_person" | "virtual";
   /** Job won only — used for Sales Exec Invoicing commission rows */
   quote_number?: string;
-  /** Job won only — equal split across all active roster execs on that company */
+  /** Job won only — equal split of the SE share with the people in split_with */
   split_commission?: boolean;
+  /** Job won only — first names of the other execs on this deal. Benji is off every account. */
+  split_with?: string[];
   /**
    * Job won only — full commission schedule then /2 client charge
    * (Quotie / process win without a salesman). Independent of split.
@@ -58,8 +60,24 @@ export type SheetActivity = {
   visitKind?: "in_person" | "virtual";
   quoteNumber?: string;
   splitCommission?: boolean;
+  /** Other execs sharing this win. Present only when splitCommission is true. */
+  splitWith?: string[];
   halfCommissionCharge?: boolean;
 };
+
+/** Execs who can share a commission. Benji is not on any account. */
+export const SPLIT_PARTNER_NAMES = ["Lachlan", "Zac", "Buzz", "Max"] as const;
+
+/** Partners the logger can tick. The logger's own share is already included. */
+export function splitPartnerOptions(loggerName: string): string[] {
+  const first = (loggerName || "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  return SPLIT_PARTNER_NAMES.filter(name => name.toLowerCase() !== first);
+}
+
+export function chosenSplitPartners(loggerName: string, selected: string[] | undefined): string[] {
+  const allowed = new Set(splitPartnerOptions(loggerName));
+  return (selected || []).map(name => name.trim()).filter(name => allowed.has(name));
+}
 
 export function isIsoDate(v: string | null | undefined): boolean {
   return typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
@@ -115,6 +133,11 @@ export function buildSheetActivities(
           quoteNumber: (it.quote_number || "").trim(),
           splitCommission: Boolean(it.split_commission),
           halfCommissionCharge: Boolean(it.half_commission_charge),
+          // Always send the list when splitting so a missed tick cannot fall
+          // back to paying the whole company roster.
+          ...(it.split_commission
+            ? { splitWith: (it.split_with || []).map(name => name.trim()).filter(Boolean) }
+            : {}),
         }
       : {}),
   }));

@@ -9,7 +9,7 @@
  * @param {string} companyName  EOD company roster name (e.g. "Bolton EC")
  * @param {object} activity     Sheet-shaped activity: salesPerson, contactName,
  *                              contactAddress, quoteJobValue, quoteNumber?,
- *                              splitCommission?, halfCommissionCharge?
+ *                              splitCommission?, splitWith?, halfCommissionCharge?
  * @returns {Promise<{ ok: boolean, skipped?: boolean, status?: number, body?: any, error?: string }>}
  */
 async function reportJobWonToCommission(companyName, activity) {
@@ -29,6 +29,10 @@ async function reportJobWonToCommission(companyName, activity) {
     split_commission: Boolean(activity.splitCommission),
     half_commission_charge: Boolean(activity.halfCommissionCharge),
   };
+  // Only when the form named people. Omitted → invoicing uses the company roster.
+  if (Array.isArray(activity.splitWith)) {
+    payload.split_with = activity.splitWith;
+  }
 
   try {
     const res = await fetch(url, {

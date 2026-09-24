@@ -156,6 +156,8 @@ async function reportJobWonToCommission(
     quote_number: String(entry.quoteNumber ?? "").trim(),
     split_commission: Boolean(entry.splitCommission),
     half_commission_charge: Boolean(entry.halfCommissionCharge),
+    // Omitted when the form didn't name people → invoicing uses the company roster.
+    ...(Array.isArray(entry.splitWith) ? { split_with: entry.splitWith } : {}),
   };
   try {
     const res = await fetch(COMMISSION_WEBHOOK_URL, {

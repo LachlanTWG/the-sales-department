@@ -13,7 +13,8 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { createManualActivities } from "./actions";
-import type { NewActivityItem } from "@/lib/manualActivities";
+import { chosenSplitPartners, type NewActivityItem } from "@/lib/manualActivities";
+import { SplitWithPicker } from "@/components/SplitWithPicker";
 
 // Backfill-only surface. Day-to-day Email sent / Quote sent should come from
 // mailbox OAuth sync (Gmail/Outlook) and Quotie — these exist when automation misses.
@@ -39,6 +40,7 @@ type Item = {
   appointment_at: string;
   quote_number: string;
   split_commission: boolean;
+  split_with: string[];
   half_commission_charge: boolean;
 };
 
@@ -51,6 +53,7 @@ const emptyItem = (): Item => ({
   appointment_at: "",
   quote_number: "",
   split_commission: false,
+  split_with: [],
   half_commission_charge: false,
 });
 
@@ -87,6 +90,7 @@ export function AddActivityDrawer({
   const [items, setItems] = useState<Item[]>([emptyItem()]);
 
   const companyPeople = useMemo(() => peopleFor(companyId), [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const loggerName = salesPeople.find(p => p.id === salesPersonId)?.name ?? "";
 
   function chooseCompany(id: string) {
     setCompanyId(id);
@@ -113,6 +117,10 @@ export function AddActivityDrawer({
           setError("Quote number is required for job won (commission sheet)");
           return;
         }
+        if (it.split_commission && chosenSplitPartners(loggerName, it.split_with).length === 0) {
+          setError("Tick who this commission is split with");
+          return;
+        }
       }
     }
     startTransition(async () => {
@@ -125,6 +133,7 @@ export function AddActivityDrawer({
         appointment_at: it.appointment_at,
         quote_number: it.quote_number,
         split_commission: it.split_commission,
+        split_with: it.split_commission ? chosenSplitPartners(loggerName, it.split_with) : [],
         half_commission_charge: it.half_commission_charge,
       }));
       const res = await createManualActivities({
@@ -274,20 +283,32 @@ export function AddActivityDrawer({
                             </span>
                           </span>
                         </label>
-                        <label className="flex items-start gap-2 text-xs text-zinc-300">
-                          <input
-                            type="checkbox"
-                            checked={it.split_commission}
-                            onChange={e => patchItem(i, { split_commission: e.target.checked })}
-                            className="mt-0.5 rounded border-zinc-600 bg-zinc-900"
-                          />
-                          <span>
-                            <span className="font-medium text-zinc-200">Team split</span>
-                            <span className="mt-0.5 block text-[11px] text-zinc-500">
-                              Split SE share equally across the roster on this client (2- or 3-person teams). Can combine with 50% charge.
+                        <div>
+                          <label className="flex items-start gap-2 text-xs text-zinc-300">
+                            <input
+                              type="checkbox"
+                              checked={it.split_commission}
+                              onChange={e => patchItem(i, {
+                                split_commission: e.target.checked,
+                                split_with: e.target.checked ? it.split_with : [],
+                              })}
+                              className="mt-0.5 rounded border-zinc-600 bg-zinc-900"
+                            />
+                            <span>
+                              <span className="font-medium text-zinc-200">Team split</span>
+                              <span className="mt-0.5 block text-[11px] text-zinc-500">
+                                Split the SE share equally with the people you tick. Can combine with 50% charge.
+                              </span>
                             </span>
-                          </span>
-                        </label>
+                          </label>
+                          {it.split_commission && (
+                            <SplitWithPicker
+                              loggerName={loggerName}
+                              selected={it.split_with}
+                              onChange={names => patchItem(i, { split_with: names })}
+                            />
+                          )}
+                        </div>
                       </div>
                     </>
                   )}

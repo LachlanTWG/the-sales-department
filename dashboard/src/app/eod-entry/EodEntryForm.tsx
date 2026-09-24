@@ -13,7 +13,8 @@
 // and stay available for backfill from the dashboard Activities drawer only.
 
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
-import type { NewActivityItem } from "@/lib/manualActivities";
+import { chosenSplitPartners, type NewActivityItem } from "@/lib/manualActivities";
+import { SplitWithPicker } from "@/components/SplitWithPicker";
 import type { ContactHistory, EodOptions, PendingSiteVisit } from "./data";
 import { formatAuNzDate } from "./data";
 import {
@@ -86,6 +87,7 @@ type Item = {
   appointment_at: string;
   quote_number: string;
   split_commission: boolean;
+  split_with: string[];
   half_commission_charge: boolean;
 };
 
@@ -104,6 +106,7 @@ const emptyItem = (
   appointment_at: "",
   quote_number: "",
   split_commission: false,
+  split_with: [],
   half_commission_charge: false,
 });
 
@@ -683,6 +686,10 @@ export function EodEntryForm({
           setError("Quote number is required — it goes on the commission sheet");
           return;
         }
+        if (it.split_commission && chosenSplitPartners(salesPerson, it.split_with).length === 0) {
+          setError("Tick who this commission is split with");
+          return;
+        }
       }
     }
 
@@ -691,6 +698,7 @@ export function EodEntryForm({
       contact_id:
         it.contact_id?.trim() ||
         (contactId && it.contact_name.trim() === contactName.trim() ? contactId : ""),
+      split_with: it.split_commission ? chosenSplitPartners(salesPerson, it.split_with) : [],
     }));
     submit(payloadItems, eventType);
   }
@@ -1083,20 +1091,32 @@ export function EodEntryForm({
                                 </span>
                               </span>
                             </label>
-                            <label className="flex items-start gap-2 text-xs text-zinc-300">
-                              <input
-                                type="checkbox"
-                                checked={it.split_commission}
-                                onChange={e => patchItem(i, { split_commission: e.target.checked })}
-                                className="mt-0.5 rounded border-zinc-600 bg-zinc-900"
-                              />
-                              <span>
-                                <span className="font-medium text-zinc-200">Team split</span>
-                                <span className="mt-0.5 block text-[11px] text-zinc-500">
-                                  Split SE share equally across the roster on this client (2- or 3-person teams). Can combine with 50% charge.
+                            <div>
+                              <label className="flex items-start gap-2 text-xs text-zinc-300">
+                                <input
+                                  type="checkbox"
+                                  checked={it.split_commission}
+                                  onChange={e => patchItem(i, {
+                                    split_commission: e.target.checked,
+                                    split_with: e.target.checked ? it.split_with : [],
+                                  })}
+                                  className="mt-0.5 rounded border-zinc-600 bg-zinc-900"
+                                />
+                                <span>
+                                  <span className="font-medium text-zinc-200">Team split</span>
+                                  <span className="mt-0.5 block text-[11px] text-zinc-500">
+                                    Split the SE share equally with the people you tick. Can combine with 50% charge.
+                                  </span>
                                 </span>
-                              </span>
-                            </label>
+                              </label>
+                              {it.split_commission && (
+                                <SplitWithPicker
+                                  loggerName={salesPerson}
+                                  selected={it.split_with}
+                                  onChange={names => patchItem(i, { split_with: names })}
+                                />
+                              )}
+                            </div>
                           </div>
                           <Field
                             label="Address"
