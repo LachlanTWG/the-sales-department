@@ -20,12 +20,20 @@ import { formatAuNzDate } from "./data";
 import {
   completePendingSiteVisit,
   dismissPendingSiteVisit,
+  fetchQuotieFollowUpState,
   fetchQuotieTeamMembers,
   loadPreviousQuotes,
   submitEodEntry,
   type EodEntryInput,
+  type QuotieLeg,
 } from "./actions";
-import type { QuotieTeamMember } from "./quotie";
+import type {
+  QuotieClientConfig,
+  QuotieFollowUpState,
+  QuotieLane,
+  QuotieLocalWallClock,
+  QuotieTeamMember,
+} from "./quotie";
 import { SiteVisitSection } from "./SiteVisitSection";
 
 // Site visits are logged via the pending calendar banner (not this Type selector).
@@ -122,33 +130,153 @@ const STAGE_SHORT_LABELS: Record<string, string> = {
   "Post Quote Follow Up": "Post Quote",
 };
 
-/** Human blurb for the "Add to Quotie pipeline" section, per outcome. */
+const HISTORY_TAIL = "Add any detail for the attempt history below.";
+
+/**
+ * Human blurb for the Quotie section, per lane + outcome. The pre-quote strings
+ * describe Quotie's callback pipeline (callback_leads); the post-quote strings
+ * describe what happens to the contact's open SENT quote group.
+ */
 function pipelineDescription(
+  lane: QuotieLane,
   stdOutcome: string,
+  eod3Outcome: string | undefined,
+  eod3FollowUp: boolean,
   eod3Callback: boolean,
-  eod2Callback: boolean,
+  eod2Signal: boolean,
 ): string {
-  if (eod2Callback) {
-    return "Logs a no-answer attempt in Quotie's pipeline — the lead moves along the call-back cadence. Add any detail for the attempt history below.";
+  // No outcome-driven move — the exec simply asked for a next-touch date.
+  if (!eod3FollowUp && !eod3Callback && !eod2Signal) {
+    return lane === "post_quote"
+      ? `Reschedules the quote follow-up in Quotie. ${HISTORY_TAIL}`
+      : `Sets the call-back date on the Quotie lead. ${HISTORY_TAIL}`;
+  }
+  if (lane === "post_quote") {
+    if (eod2Signal) {
+      return `Quotie will push the follow-up out by the exec's no-answer delay. ${HISTORY_TAIL}`;
+    }
+    if (eod3FollowUp) {
+      switch (eod3Outcome) {
+        case "reschedule":
+          return `Reschedules this contact's Quotie quote follow-up and logs the call in its history. ${HISTORY_TAIL}`;
+        case "no_answer":
+          return `Quotie will push the follow-up out by the exec's no-answer delay. ${HISTORY_TAIL}`;
+        case "verbal_yes":
+          return `Marks the quote as a verbal yes in Quotie (moves to the Verbal Yes column). ${HISTORY_TAIL}`;
+        case "hot":
+          return `Flags the quote as a hot lead in Quotie. ${HISTORY_TAIL}`;
+        case "lost":
+        case "abandoned":
+          return `Closes this contact's open quote in Quotie as ${eod3Outcome === "lost" ? "lost" : "abandoned"}. ${HISTORY_TAIL}`;
+        default:
+          return `Updates this contact's Quotie quote follow-up. ${HISTORY_TAIL}`;
+      }
+    }
+    // Lane-neutral fallbacks (Requires Quoting) still use the pre-quote wording.
+  }
+  if (eod2Signal) {
+    return `Logs a no-answer attempt in Quotie's pipeline — the lead moves along the call-back cadence. ${HISTORY_TAIL}`;
   }
   if (eod3Callback) {
-    if (stdOutcome === "Requires Quoting") {
-      return "Drops this lead into Quotie's Requires Quoting column with a Create Quote button. Add any detail for the attempt history below.";
+    if (eod3Outcome === "requires_quoting") {
+      return `Drops this lead into Quotie's Requires Quoting column with a Create Quote button. ${HISTORY_TAIL}`;
     }
-    if (stdOutcome === "Not a Good Time to Talk") {
-      return "Parks this lead in Quotie for a later call-back. Add any detail for the attempt history below.";
+    if (eod3Outcome === "callback_requested") {
+      return stdOutcome === "Not Ready Yet - Pre-Quote"
+        ? `Parks this lead in Quotie for a later call-back — not ready yet. ${HISTORY_TAIL}`
+        : `Parks this lead in Quotie for a later call-back. ${HISTORY_TAIL}`;
     }
     // DQ / Lost family
-    return "Moves this lead to Quotie's Lost column. Add any detail for the attempt history below.";
+    return `Moves this lead to Quotie's Lost column. ${HISTORY_TAIL}`;
   }
-  return "Adds this lead to Quotie's pipeline. Add any detail for the attempt history below.";
+  return `Adds this lead to Quotie's pipeline. ${HISTORY_TAIL}`;
 }
+
+const EMPTY_QUOTIE_CLIENT: QuotieClientConfig = {
+  actions: { pre_quote: {}, post_quote: {} },
+  answered: { pre_quote: {}, post_quote: {} },
+  post_quote_stages: ["Post Quote Follow Up"],
+};
+
+/**
+ * Outcomes that close the record instead of scheduling the next touch: the
+ * move still fires under the "Set follow-up" checkbox (relabelled "Update
+ * Quotie"), but there is nowhere for a date to land, so the picker is hidden.
+ */
+const NO_FOLLOW_UP_DATE_OUTCOMES = ["lost", "abandoned", "requires_quoting"];
 
 /** YYYY-MM-DD `days` from now, in local time. */
 function isoInDays(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() + days);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * Every date this form shows or computes is an AU east-coast wall clock, the
+ * same zone Quotie stores them in. Pinned explicitly because the popup runs in
+ * whatever timezone the exec's browser claims.
+ */
+const EOD_TZ = "Australia/Sydney";
+
+/** Today in EOD_TZ as YYYY-MM-DD — comparable against Quotie's *_local dates. */
+function todayIsoTz(): string {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: EOD_TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+/**
+ * Quotie's company-local wall clock as "Thu 18 Sep 14:30". The date is already
+ * local, so it is anchored at midday UTC before formatting — never re-parse the
+ * timestamptz, which would shift the day either side of the date line.
+ */
+function formatWallClock(local: QuotieLocalWallClock | null | undefined): string {
+  if (!local?.date) return "";
+  const [y, m, d] = local.date.split("-").map(Number);
+  if (!y || !m || !d) return local.date;
+  let label = local.date;
+  try {
+    label = new Intl.DateTimeFormat("en-AU", {
+      timeZone: EOD_TZ,
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+    }).format(new Date(Date.UTC(y, m - 1, d, 12, 0, 0)));
+  } catch { /* keep the raw date */ }
+  return local.time ? `${label} ${local.time}` : label;
+}
+
+/** "requires_quoting" → "Requires Quoting" for the current-state line. */
+function humaniseStatus(status: string | null | undefined): string {
+  const s = (status || "").trim();
+  if (!s) return "";
+  return s
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map(w => w[0].toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+/** 1 → "1st follow-up". Nothing below 1 — a quote nobody has chased yet. */
+function followUpOrdinal(count: number): string {
+  if (!Number.isFinite(count) || count < 1) return "";
+  const n = Math.floor(count);
+  const tens = n % 100;
+  const suffix =
+    tens >= 11 && tens <= 13 ? "th"
+    : n % 10 === 1 ? "st"
+    : n % 10 === 2 ? "nd"
+    : n % 10 === 3 ? "rd"
+    : "th";
+  return `${n}${suffix} follow-up`;
 }
 
 export function EodEntryForm({
@@ -167,9 +295,10 @@ export function EodEntryForm({
   options = FALLBACK_OPTIONS,
   history = null,
   pendingSiteVisits = [],
-  quotieActions = {},
-  answeredCallbacks = {},
+  quotieClient = EMPTY_QUOTIE_CLIENT,
   quotieEnabled = false,
+  quotieFollowUp = null,
+  quotieFollowUpFailed = false,
 }: {
   token: string;
   ghlLocationId?: string;
@@ -189,20 +318,33 @@ export function EodEntryForm({
   options?: EodOptions;
   history?: ContactHistory | null;
   pendingSiteVisits?: PendingSiteVisit[];
-  /** EOD 3 outcome → Quotie action kind. Empty {} disables the feature. */
-  quotieActions?: Record<string, "task" | "site_visit" | "callback">;
-  /** EOD 2 (Answered?) selection → pushes a no-answer/voicemail pipeline callback. */
-  answeredCallbacks?: Record<string, true>;
+  /**
+   * Safe both-lane Quotie projection (no api_key / api_url / user_map): EOD 3
+   * outcome → action per lane, EOD 2 signals per lane, and the EOD 1 stages
+   * that pre-select the post-quote lane. All-empty disables the feature.
+   */
+  quotieClient?: QuotieClientConfig;
   /** Company has a Quotie api_key — enables the always-available task checkbox. */
   quotieEnabled?: boolean;
+  /**
+   * What Quotie already has scheduled for this contact, read when the popup
+   * opened. Null means either "not asked" or "could not reach Quotie" —
+   * quotieFollowUpFailed separates the two.
+   */
+  quotieFollowUp?: QuotieFollowUpState | null;
+  /** The read was attempted and failed (timeout / non-200). */
+  quotieFollowUpFailed?: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [savedCount, setSavedCount] = useState<number | null>(null);
   const [pipelineNote, setPipelineNote] = useState<string | null>(null);
   const [pipelineOk, setPipelineOk] = useState<boolean>(false);
-  const [quotieResult, setQuotieResult] = useState<{ ok: boolean; detail?: string } | null>(null);
-  const [quotieKindDone, setQuotieKindDone] = useState<"task" | "site_visit" | "callback" | null>(null);
+  const [quotieResult, setQuotieResult] = useState<
+    { ok: boolean; detail?: string; legs?: QuotieLeg[] } | null
+  >(null);
+  /** What the follow-up leg of the last submit should be called in the banner. */
+  const [quotieFuLabel, setQuotieFuLabel] = useState("Follow-up set in Quotie");
   const [openPendings, setOpenPendings] = useState<PendingSiteVisit[]>(pendingSiteVisits);
   const [activePending, setActivePending] = useState<PendingSiteVisit | null>(null);
   const [svRough, setSvRough] = useState("");
@@ -316,16 +458,90 @@ export function EodEntryForm({
   const [customOutcome, setCustomOutcome] = useState("");
   const [source, setSource] = useState(defaultLeadSource || history?.topSource || "");
 
-  // ── Quotie action state (only relevant when quotieActions[stdOutcome] set) ──
-  const quotieKind = quotieActions[stdOutcome];
-  // A pipeline callback can come from EOD 3 (quotieKind === "callback") OR from
-  // the EOD 2 "Answered?" step (no-answer / voicemail). EOD 3 wins — never both.
+  // ── Quotie state read on open ─────────────────────────────────────────
+  // What Quotie already had scheduled when the popup rendered. Refreshed after
+  // a successful submit so the "In Quotie: …" line shows the move that landed.
+  const [fuState, setFuState] = useState<QuotieFollowUpState | null>(quotieFollowUp);
+  const [fuStateFailed, setFuStateFailed] = useState(quotieFollowUpFailed);
+
+  // ── Quotie lane ───────────────────────────────────────────────────────
+  // Quotie's own answer is the source of truth: it is the only side that can
+  // see whether a SENT quote is still open, so it outranks the EOD 1 stage
+  // even after the exec changes the stage. The stage only picks the lane when
+  // the read was unavailable (integration off, no contact id, or it failed).
+  // The manual toggle (laneOverride) still beats both, and resets on a stage
+  // change and after a submit.
+  const [laneOverride, setLaneOverride] = useState<QuotieLane | null>(null);
+  const stageLane: QuotieLane = quotieClient.post_quote_stages.includes(stage.trim())
+    ? "post_quote"
+    : "pre_quote";
+  const lane: QuotieLane = laneOverride ?? (fuState ? fuState.lane : stageLane);
+  useEffect(() => {
+    setLaneOverride(null); // eslint-disable-line react-hooks/set-state-in-effect
+  }, [stage]);
+
+  // ── Quotie action state (only relevant when the lane maps this outcome) ──
+  const activeActions = quotieClient.actions[lane];
+  const activeAnswered = quotieClient.answered[lane];
+  const quotieAction = activeActions[stdOutcome];
+  const quotieKind = quotieAction?.type;
+  // A Quotie pipeline move can come from EOD 3 (callback in the pre lane,
+  // follow_up in the post lane) OR from the EOD 2 "Answered?" step. EOD 3 wins
+  // — never both.
   const eod3Callback = quotieKind === "callback";
-  const eod2Callback = !eod3Callback && !!answeredCallbacks[answered];
-  const pipelineCallback = eod3Callback || eod2Callback;
-  // Only "Not a Good Time to Talk" captures a when-to-call-back date (Parked).
-  const showCallbackDate = eod3Callback && stdOutcome === "Not a Good Time to Talk";
-  const [qcbDate, setQcbDate] = useState("");
+  const eod3FollowUp = quotieKind === "follow_up";
+  const eod2Signal = !eod3Callback && !eod3FollowUp && !!activeAnswered[answered];
+  const quotieLinked = eod3Callback || eod3FollowUp || eod2Signal;
+  // Does this outcome / answer drive a Quotie pipeline move in the OTHER lane?
+  // Drives the lane toggle's visibility so an exec who picked, say, "Not Ready
+  // Yet - Pre-Quote" while on the Post Quote stage can still flip to Pre-quote.
+  const otherLane: QuotieLane = lane === "post_quote" ? "pre_quote" : "post_quote";
+  const otherKind = quotieClient.actions[otherLane][stdOutcome]?.type;
+  const linkedInOtherLane =
+    otherKind === "callback" || otherKind === "follow_up" || !!quotieClient.answered[otherLane][answered];
+
+  // ── "Set follow-up" ───────────────────────────────────────────────────
+  // One checkbox for the whole Quotie pipeline leg, in either lane: it carries
+  // the EOD 3 move, the EOD 2 no-answer signal, and the plain "just set a date"
+  // case. Auto-ticked whenever the log means something to Quotie (including in
+  // the other lane, so the switch is discoverable) until the exec touches it.
+  const [fuTouched, setFuTouched] = useState(false);
+  const [fuChecked, setFuChecked] = useState(false);
+  const qfuEnabled = quotieEnabled && (fuTouched ? fuChecked : quotieLinked || linkedInOtherLane);
+  // The EOD 3 move this submit would make, if any — drives the label and
+  // whether a date has anywhere to land.
+  const moveOutcome = eod3Callback || eod3FollowUp ? (quotieAction?.outcome || "") : "";
+  /** lost / abandoned / requires_quoting close the record: no date, and the
+   *  checkbox reads "Update Quotie" rather than "Set follow-up". */
+  const followUpTerminal = NO_FOLLOW_UP_DATE_OUTCOMES.includes(moveOutcome);
+  const showFollowUpDate = qfuEnabled && !followUpTerminal;
+  /**
+   * A date is only compulsory where Quotie cannot invent one: a reschedule, a
+   * call-back request, and the plain "just set a follow-up" case. The EOD 2
+   * no-answer path bumps by the exec's own delay (post) or to the next
+   * business day (pre) when left blank, so demanding a date there would tax
+   * the most common log of the day. verbal_yes / hot are optional too.
+   */
+  const followUpDateRequired =
+    showFollowUpDate &&
+    (moveOutcome === "reschedule" ||
+      moveOutcome === "callback_requested" ||
+      (!eod3Callback && !eod3FollowUp && !eod2Signal));
+
+  // Date/time: Quotie's existing next touch is the default, and only when it is
+  // still in the future — a stale date would quietly re-book the past. null =
+  // "still showing the prefill"; any string = the exec's own choice.
+  const fuRecordLocal: QuotieLocalWallClock | null =
+    (lane === "post_quote"
+      ? fuState?.post_quote?.follow_up_local
+      : fuState?.pre_quote?.callback_local) ?? null;
+  const fuPrefill: QuotieLocalWallClock | null =
+    fuRecordLocal && fuRecordLocal.date >= todayIsoTz() ? fuRecordLocal : null;
+  const [qfuDateEdit, setQfuDateEdit] = useState<string | null>(null);
+  const [qfuTimeEdit, setQfuTimeEdit] = useState<string | null>(null);
+  const qfuDate = qfuDateEdit ?? (fuPrefill?.date || "");
+  const qfuTime = qfuTimeEdit ?? (fuPrefill?.time || "");
+  const [qfuNotes, setQfuNotes] = useState("");
   // Site visit
   const [qsvEnabled, setQsvEnabled] = useState(true);
   const [qsvDate, setQsvDate] = useState(() => isoInDays(1));
@@ -343,26 +559,16 @@ export function EodEntryForm({
   const [qsvTeamMembers, setQsvTeamMembers] = useState<QuotieTeamMember[] | null>(null);
   const [qsvTeamDefaults, setQsvTeamDefaults] = useState<Record<string, string>>({});
   const teamFetchedRef = useRef(false);
-  // Task — outcome-independent: lives in the sticky bottom bar, available for
-  // any outcome. Defaults off, but auto-ticks when the outcome maps to a task
-  // (unless the exec has manually toggled it this session).
-  const [qtaskEnabled, setQtaskEnabled] = useState(false);
+  // Task — outcome-independent and now a Quotie TASK only: it lives beside the
+  // follow-up checkbox in the sticky bar and the two fire independently.
+  // Auto-ticked for outcomes that map to a task action, until the exec touches
+  // it — then their choice sticks for the rest of the session.
+  const [taskTouched, setTaskTouched] = useState(false);
+  const [taskChecked, setTaskChecked] = useState(false);
+  const qtaskEnabled = quotieEnabled && (taskTouched ? taskChecked : quotieKind === "task");
   const [qtaskTitle, setQtaskTitle] = useState("");
   const [qtaskDue, setQtaskDue] = useState("");
   const [qtaskNotes, setQtaskNotes] = useState("");
-  const userTouchedTask = useRef(false);
-  const [quotieTaskDone, setQuotieTaskDone] = useState(false);
-
-  useEffect(() => {
-    if (userTouchedTask.current) return;
-    // Auto-tick the sticky-bar checkbox for outcomes that map to a task, an
-    // EOD 3 pipeline callback (Requires Quoting, Not a Good Time, DQ/Lost), or
-    // an EOD 2 no-answer/voicemail callback.
-    const kind = quotieActions[stdOutcome];
-    if (kind === "task" || kind === "callback" || !!answeredCallbacks[answered]) {
-      setQtaskEnabled(true);
-    }
-  }, [stdOutcome, answered, quotieActions, answeredCallbacks]);
 
   // Lazy-fetch team members once when the site-visit section becomes active.
   useEffect(() => {
@@ -564,11 +770,13 @@ export function EodEntryForm({
   }
 
   function submit(payloadItems: NewActivityItem[], evType: EventType) {
-    // Site visit + callback are outcome-mapped (server re-resolves the type);
-    // the plain task is independent (sticky-bar checkbox) and rides along in
-    // quotie_task regardless of outcome.
+    // Three independent legs now: the site visit (outcome-mapped), the
+    // follow-up / pipeline move ("Set follow-up") and the task ("Quotie task").
+    // The server re-resolves every outcome — the client only says which boxes
+    // are ticked and what date the exec chose.
+    const isEod = evType === "eod_update";
     let quotie: EodEntryInput["quotie"];
-    if (evType === "eod_update" && quotieKind === "site_visit" && qsvEnabled) {
+    if (isEod && quotieKind === "site_visit" && qsvEnabled) {
       quotie = {
         type: "site_visit",
         date: qsvDate,
@@ -581,27 +789,36 @@ export function EodEntryForm({
         ghl_assigned_user_id: qsvTeam || undefined,
         send_slack: qsvSendSlack,
       };
-    } else if (evType === "eod_update" && eod3Callback && qtaskEnabled) {
-      // The sticky-bar checkbox doubles as "Add to Quotie pipeline" here. The
-      // notes field carries the free-text EOD detail into the attempt history.
-      quotie = {
-        type: "callback",
-        notes: qtaskNotes.trim() || undefined,
-        callback_date: showCallbackDate ? (qcbDate.trim() || undefined) : undefined,
-      };
+    } else if (isEod && qfuEnabled && (eod3Callback || eod3FollowUp)) {
+      // Trigger + cross-check only. The date, time and notes travel in
+      // quotie_follow_up so every path merges them the same way.
+      quotie = { type: eod3Callback ? "callback" : "follow_up" };
     }
 
-    // EOD 2 no-answer / voicemail callback — server re-resolves the outcome
-    // from eod_fields.answered; presence = the checkbox is on. Notes ride along.
+    // EOD 2 no-answer signal — the server re-resolves both the lane routing and
+    // the outcome from eod_fields; presence = the follow-up checkbox is on.
     const quotie_answered_callback: EodEntryInput["quotie_answered_callback"] =
-      evType === "eod_update" && eod2Callback && qtaskEnabled
-        ? { notes: qtaskNotes.trim() || undefined }
+      isEod && qfuEnabled && eod2Signal ? {} : undefined;
+
+    // "Set follow-up" itself: presence = ticked. With no outcome-driven move
+    // this IS the leg (reschedule / callback_requested); otherwise the server
+    // merges the date into that move. Terminal outcomes carry no date.
+    // PRESENCE is the signal, so this goes whenever the box is ticked — empty
+    // object included, as it is for lost / abandoned / requires_quoting where
+    // the picker is hidden. Unticked sends nothing at all and the server fires
+    // no pipeline call, outcome-driven or otherwise.
+    const quotie_follow_up: EodEntryInput["quotie_follow_up"] =
+      isEod && qfuEnabled
+        ? {
+            date: showFollowUpDate ? (qfuDate.trim() || undefined) : undefined,
+            time: showFollowUpDate ? (qfuTime.trim() || undefined) : undefined,
+            notes: qfuNotes.trim() || undefined,
+          }
         : undefined;
 
-    // Independent task path — skipped when a pipeline callback (EOD 3 or EOD 2)
-    // is driving the same checkbox, so we never create a task AND a callback.
+    // Task leg — fully independent of the follow-up leg now (both can fire).
     const quotie_task: EodEntryInput["quotie_task"] =
-      evType === "eod_update" && quotieEnabled && qtaskEnabled && !pipelineCallback
+      isEod && qtaskEnabled
         ? {
             title: qtaskTitle.trim() || undefined,
             notes: qtaskNotes.trim() || undefined,
@@ -623,7 +840,13 @@ export function EodEntryForm({
       quotie,
       quotie_task,
       quotie_answered_callback,
+      quotie_follow_up,
+      // Always tell the server which lane the exec was looking at; it validates
+      // and falls back to the stage when absent.
+      quotie_lane: evType === "eod_update" ? lane : undefined,
     };
+    // Terminal moves report as "Quotie updated", not "Follow-up set".
+    const fuLabel = followUpTerminal ? "Quotie updated" : "Follow-up set in Quotie";
     startTransition(async () => {
       const res = await submitEodEntry(input);
       if (!res.ok) { setError(res.error); return; }
@@ -631,18 +854,33 @@ export function EodEntryForm({
       setPipelineNote(res.pipeline ?? null);
       setPipelineOk(res.pipelineOk ?? false);
       setQuotieResult(res.quotie_result ?? null);
-      setQuotieKindDone(
-        input.quotie?.type
-          ?? (input.quotie_answered_callback ? "callback" : null)
-          ?? (input.quotie_task ? "task" : null),
-      );
-      setQuotieTaskDone(!!input.quotie_task);
+      setQuotieFuLabel(fuLabel);
       if (evType === "eod_update") {
         // Keep stage + source (same contact, likely same context next time);
-        // clear the per-call outcomes.
+        // clear the per-call outcomes and the per-call Quotie fields, and hand
+        // the lane + both checkboxes back to their auto behaviour.
         setAnswered("");
         setStdOutcome("");
         setCustomOutcome("");
+        setQfuDateEdit(null);
+        setQfuTimeEdit(null);
+        setQfuNotes("");
+        setFuTouched(false);
+        setFuChecked(false);
+        setTaskTouched(false);
+        setTaskChecked(false);
+        setLaneOverride(null);
+        // Re-read Quotie so the "In Quotie: …" line shows what just landed.
+        if (contactId) {
+          fetchQuotieFollowUpState({
+            token,
+            ghl_location_id: ghlLocationId,
+            ghl_contact_id: contactId,
+          }).then(r => {
+            setFuState(r.state);
+            setFuStateFailed(!r.ok);
+          }).catch(() => setFuStateFailed(true));
+        }
       } else {
         setItems([emptyItem(contactName, contactAddress, defaultLeadSource, contactId)]);
       }
@@ -656,10 +894,14 @@ export function EodEntryForm({
     setPipelineNote(null);
     setPipelineOk(false);
     setQuotieResult(null);
-    setQuotieKindDone(null);
 
     if (eventType === "eod_update") {
       if (!answered) { setError("Tap Answered or Didn't Answer"); return; }
+      // Only the paths where Quotie cannot pick its own next date.
+      if (followUpDateRequired && !qfuDate.trim()) {
+        setError("Pick a follow-up date");
+        return;
+      }
       // Same join as the GHL webhook: parts trimmed, " | " separator, empties kept.
       const outcome = [stage, answered, stdOutcome, customOutcome, source]
         .map(s => s.trim())
@@ -1148,29 +1390,133 @@ export function EodEntryForm({
             </>
           )}
 
+          {/* ── Follow-up panel ────────────────────────────────────────
+              Everything the "Set follow-up" checkbox drives: what Quotie
+              already has, which lane the move lands in, what the move does,
+              and when the next touch should be. */}
+          {quotieEnabled && eventType === "eod_update" && qfuEnabled && (
+            <div className="space-y-3 rounded-lg border border-sky-900/60 bg-sky-950/20 p-3">
+              <span className="block text-[11px] font-medium uppercase tracking-wider text-sky-300/90">
+                {followUpTerminal ? "Update Quotie" : "Quotie follow-up"}
+              </span>
+
+              <QuotieStateLine lane={lane} state={fuState} failed={fuStateFailed} />
+
+              <Field
+                label="Quotie lane"
+                hint="Pre-quote → callback pipeline · Post-quote → quote follow-ups."
+              >
+                <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Quotie lane">
+                  {([
+                    { value: "pre_quote" as const, label: "Pre-quote" },
+                    { value: "post_quote" as const, label: "Post-quote" },
+                  ]).map(l => (
+                    <button
+                      key={l.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={lane === l.value}
+                      onClick={() => setLaneOverride(l.value)}
+                      className={
+                        lane === l.value
+                          ? "rounded border border-sky-600 bg-sky-600/20 px-3 py-2 text-sm font-medium text-sky-300"
+                          : "rounded border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-400 hover:border-zinc-600"
+                      }
+                    >
+                      {l.label}
+                    </button>
+                  ))}
+                </div>
+                {!quotieLinked && linkedInOtherLane && (
+                  <p className="mt-1 text-[10px] text-amber-300/90">
+                    This outcome only moves Quotie in the {lane === "post_quote" ? "Pre-quote" : "Post-quote"} lane —
+                    switch to apply it. Logging now just sets the follow-up date.
+                  </p>
+                )}
+              </Field>
+
+              <p className="text-[11px] leading-relaxed text-sky-200/70">
+                {pipelineDescription(
+                  lane,
+                  stdOutcome,
+                  quotieAction?.outcome,
+                  eod3FollowUp,
+                  eod3Callback,
+                  eod2Signal,
+                )}
+              </p>
+
+              {showFollowUpDate && (
+                <Field
+                  label={
+                    (lane === "post_quote" ? "Follow up on" : "Call back on") +
+                    (followUpDateRequired ? "" : " (optional)")
+                  }
+                  hint={
+                    followUpDateRequired
+                      ? "When to touch this contact next — Quotie reads it in the company's timezone."
+                      : "Optional — Quotie bumps by the usual delay if blank. A date here wins."
+                  }
+                >
+                  <div className="mb-2 grid grid-cols-4 gap-2">
+                    {[
+                      { label: "Tomorrow", days: 1 },
+                      { label: "3 days", days: 3 },
+                      { label: "1 week", days: 7 },
+                      { label: "2 weeks", days: 14 },
+                    ].map(q => {
+                      const val = isoInDays(q.days);
+                      return (
+                        <button
+                          key={q.label}
+                          type="button"
+                          onClick={() => setQfuDateEdit(val)}
+                          className={
+                            qfuDate === val
+                              ? "rounded border border-emerald-600 bg-emerald-600/20 px-2 py-1.5 text-center text-xs font-medium text-emerald-300"
+                              : "rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-center text-xs text-zinc-400 hover:border-zinc-600"
+                          }
+                        >
+                          {q.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <input
+                      type="date"
+                      value={qfuDate}
+                      onChange={e => setQfuDateEdit(e.target.value)}
+                      className={inputClass}
+                    />
+                    <input
+                      type="time"
+                      value={qfuTime}
+                      onChange={e => setQfuTimeEdit(e.target.value)}
+                      className={inputClass}
+                    />
+                  </div>
+                </Field>
+              )}
+
+              <Field label="Notes" hint="Optional — lands in Quotie's attempt history.">
+                <textarea
+                  value={qfuNotes}
+                  onChange={e => setQfuNotes(e.target.value)}
+                  rows={2}
+                  className={inputClass}
+                />
+              </Field>
+            </div>
+          )}
+
+          {/* ── Task panel ─────────────────────────────────────────────
+              A plain Quotie task, independent of the follow-up leg. */}
           {quotieEnabled && eventType === "eod_update" && qtaskEnabled && (
             <div className="space-y-3 rounded-lg border border-sky-900/60 bg-sky-950/20 p-3">
               <span className="block text-[11px] font-medium uppercase tracking-wider text-sky-300/90">
-                {pipelineCallback ? "Quotie pipeline" : "Quotie task"}
+                Quotie task
               </span>
-              {pipelineCallback ? (
-                <>
-                  <p className="text-[11px] leading-relaxed text-sky-200/70">
-                    {pipelineDescription(stdOutcome, eod3Callback, eod2Callback)}
-                  </p>
-                  {showCallbackDate && (
-                    <Field label="Call back on" hint="Optional — when to try again.">
-                      <input
-                        type="date"
-                        value={qcbDate}
-                        onChange={e => setQcbDate(e.target.value)}
-                        className={inputClass}
-                      />
-                    </Field>
-                  )}
-                </>
-              ) : (
-              <>
               <Field label="Title" hint="Leave blank to auto-title from the outcome.">
                 <input
                   type="text"
@@ -1211,8 +1557,6 @@ export function EodEntryForm({
                   className={inputClass}
                 />
               </Field>
-              </>
-              )}
               <Field label="Notes" hint="Optional.">
                 <textarea
                   value={qtaskNotes}
@@ -1247,19 +1591,35 @@ export function EodEntryForm({
                     {pipelineNote && !pipelineOk && (
                       <span className="mt-0.5 block text-amber-300/90">Pipeline not moved: {pipelineNote}</span>
                     )}
-                    {quotieResult && quotieResult.ok && (
-                      <span className="mt-0.5 block text-sky-300">
-                        ✓ {quotieKindDone === "site_visit"
-                          ? (quotieTaskDone ? "Site visit + task created in Quotie" : "Site visit booked in Quotie")
-                          : quotieKindDone === "callback"
-                            ? "Added to Quotie pipeline"
-                            : "Task created in Quotie"}
-                        {quotieResult.detail ? ` · ${quotieResult.detail}` : ""}
-                      </span>
-                    )}
-                    {quotieResult && !quotieResult.ok && (
-                      <span className="mt-0.5 block text-amber-300/90">
-                        ⚠ Quotie: {quotieResult.detail || "action not created"}
+                    {/* One line per Quotie leg — a booked visit, the follow-up
+                        move and the task each report for themselves. */}
+                    {quotieResult?.legs?.map((leg, i) => {
+                      const label =
+                        leg.kind === "visit" ? "Site visit booked in Quotie"
+                        : leg.kind === "task" ? "Task created in Quotie"
+                        : quotieFuLabel;
+                      return leg.ok ? (
+                        <span key={i} className="mt-0.5 block text-sky-300">
+                          ✓ {label}{leg.detail ? ` · ${leg.detail}` : ""}
+                        </span>
+                      ) : (
+                        <span key={i} className="mt-0.5 block text-amber-300/90">
+                          ⚠ Quotie {leg.kind === "visit" ? "site visit" : leg.kind === "task" ? "task" : "follow-up"}:{" "}
+                          {leg.detail || "not updated"}
+                        </span>
+                      );
+                    })}
+                    {quotieResult && !quotieResult.legs?.length && (
+                      <span
+                        className={
+                          quotieResult.ok
+                            ? "mt-0.5 block text-sky-300"
+                            : "mt-0.5 block text-amber-300/90"
+                        }
+                      >
+                        {quotieResult.ok
+                          ? `✓ Quotie updated${quotieResult.detail ? ` · ${quotieResult.detail}` : ""}`
+                          : `⚠ Quotie: ${quotieResult.detail || "action not created"}`}
                       </span>
                     )}
                   </>
@@ -1269,20 +1629,36 @@ export function EodEntryForm({
 
             <div className="flex items-center justify-between gap-3">
               {quotieEnabled && eventType === "eod_update" ? (
-                <label className="flex min-w-0 items-center gap-2 text-xs text-zinc-300">
-                  <input
-                    type="checkbox"
-                    checked={qtaskEnabled}
-                    onChange={e => {
-                      userTouchedTask.current = true;
-                      setQtaskEnabled(e.target.checked);
-                    }}
-                    className="rounded border-zinc-600 bg-zinc-900"
-                  />
-                  <span className="truncate font-medium text-zinc-200">
-                    {pipelineCallback ? "Add to Quotie pipeline" : "Also create a Quotie task"}
-                  </span>
-                </label>
+                // Two independent Quotie legs, side by side: a task, and the
+                // follow-up / pipeline move. Either, both or neither.
+                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                  <label className="flex min-w-0 items-center gap-1.5 text-xs text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={qtaskEnabled}
+                      onChange={e => {
+                        setTaskTouched(true);
+                        setTaskChecked(e.target.checked);
+                      }}
+                      className="rounded border-zinc-600 bg-zinc-900"
+                    />
+                    <span className="truncate font-medium text-zinc-200">Quotie task</span>
+                  </label>
+                  <label className="flex min-w-0 items-center gap-1.5 text-xs text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={qfuEnabled}
+                      onChange={e => {
+                        setFuTouched(true);
+                        setFuChecked(e.target.checked);
+                      }}
+                      className="rounded border-zinc-600 bg-zinc-900"
+                    />
+                    <span className="truncate font-medium text-zinc-200">
+                      {followUpTerminal ? "Update Quotie" : "Set follow-up"}
+                    </span>
+                  </label>
+                </div>
               ) : (
                 <span />
               )}
@@ -1296,6 +1672,91 @@ export function EodEntryForm({
             </div>
           </div>
         </form>
+    </div>
+  );
+}
+
+/**
+ * "In Quotie: …" — what the contact's record looked like when the popup opened
+ * (refreshed after each submit). Reads the lane the exec is about to log
+ * against, so flipping the toggle shows the record that move will touch.
+ * Everything comes from the endpoint's *_local wall clocks; the timestamptz is
+ * never re-parsed here.
+ */
+function QuotieStateLine({
+  lane,
+  state,
+  failed,
+}: {
+  lane: QuotieLane;
+  state: QuotieFollowUpState | null;
+  failed: boolean;
+}) {
+  const muted = "rounded border border-zinc-800 bg-zinc-950/50 px-2.5 py-1.5 text-[11px] text-zinc-400";
+
+  if (failed) {
+    return <div className={muted}>Couldn&apos;t reach Quotie — will still update on submit.</div>;
+  }
+
+  const post = state?.post_quote;
+  const pre = state?.pre_quote;
+
+  if (lane === "post_quote") {
+    if (!post) {
+      return (
+        <div className={muted}>
+          No open sent quote in Quotie — switch to Pre-quote to log a call-back.
+        </div>
+      );
+    }
+    const when = formatWallClock(post.follow_up_local);
+    const overdue = !!post.follow_up_local && post.follow_up_local.date < todayIsoTz();
+    const bits = [
+      followUpOrdinal(post.reschedule_count),
+      post.group_name || "",
+      post.other_open_groups > 0
+        ? `+${post.other_open_groups} other open quote${post.other_open_groups === 1 ? "" : "s"}`
+        : "",
+      post.is_hot ? "hot" : "",
+      post.verbal_confirmed_at ? "verbal yes" : "",
+    ].filter(Boolean);
+    return (
+      <div className={muted}>
+        In Quotie: follow-up{" "}
+        {when ? (
+          <span className={overdue ? "text-amber-300" : "text-zinc-200"}>
+            due {when}{overdue ? " (overdue)" : ""}
+          </span>
+        ) : (
+          <span className="text-zinc-200">not scheduled</span>
+        )}
+        {bits.length > 0 ? ` · ${bits.join(" · ")}` : ""}
+      </div>
+    );
+  }
+
+  if (!pre) {
+    return <div className={muted}>No Quotie record yet — logging will create a callback lead.</div>;
+  }
+  const when = formatWallClock(pre.callback_local);
+  const overdue = !!pre.callback_local && pre.callback_local.date < todayIsoTz();
+  const bits = [
+    pre.attempt_count > 0
+      ? `${pre.attempt_count} attempt${pre.attempt_count === 1 ? "" : "s"}`
+      : "",
+    humaniseStatus(pre.status),
+  ].filter(Boolean);
+  return (
+    <div className={muted}>
+      In Quotie: call back{" "}
+      {when ? (
+        <span className={overdue ? "text-amber-300" : "text-zinc-200"}>
+          {when}{overdue ? " (overdue)" : ""}
+        </span>
+      ) : (
+        <span className="text-zinc-200">not scheduled</span>
+      )}
+      {bits.length > 0 ? ` · ${bits.join(" · ")}` : ""}
     </div>
   );
 }
