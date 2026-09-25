@@ -36,6 +36,7 @@ export type CompanyRow = {
   slug: string;
   timezone: string;
   active: boolean;
+  owner_name?: string | null;
 };
 
 export type ActivityRow = {
@@ -100,7 +101,7 @@ export const listCompanies = cache(async function listCompanies(
 
   const { data, error } = await supabase
     .from("companies")
-    .select("id, name, slug, timezone, active")
+    .select("id, name, slug, timezone, active, owner_name")
     .eq("active", true)
     .order("name");
   if (error) throw error;

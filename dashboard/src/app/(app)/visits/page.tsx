@@ -240,7 +240,7 @@ export default async function VisitsPage({ searchParams }: { searchParams: Promi
             companies={(viewer.seesAll
               ? companies
               : companies.filter(c => viewer.companyIds.includes(c.id))
-            ).map(c => ({ id: c.id, name: c.name }))}
+            ).map(c => ({ id: c.id, name: c.name, ownerName: c.owner_name ?? null }))}
             salesPeople={salesPeople}
             visits={visits.map(v => decorateVisit(v, { companyById, personById, viewerIsAdmin: viewer.isAdmin, mySalesPersonIds }))}
           />
@@ -255,7 +255,7 @@ export default async function VisitsPage({ searchParams }: { searchParams: Promi
             companies={(viewer.seesAll
               ? companies
               : companies.filter(c => viewer.companyIds.includes(c.id))
-            ).map(c => ({ id: c.id, name: c.name }))}
+            ).map(c => ({ id: c.id, name: c.name, ownerName: c.owner_name ?? null }))}
             salesPeople={salesPeople}
             visits={visits.map(v => decorateVisit(v, { companyById, personById, viewerIsAdmin: viewer.isAdmin, mySalesPersonIds }))}
           />

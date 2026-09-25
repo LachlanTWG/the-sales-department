@@ -6,7 +6,9 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { commitEodOutcome } from "@/lib/eodOutcome";
 import { editActivity, deleteActivity } from "./actions";
+import { OutcomeFields } from "./OutcomeFields";
 
 const EVENT_TYPES = [
   { value: "eod_update",        label: "EOD update" },
@@ -30,7 +32,7 @@ export type ActivityRowForEdit = {
   company_id: string;
 };
 
-export type CompanyOption = { id: string; name: string };
+export type CompanyOption = { id: string; name: string; ownerName?: string | null };
 export type SalesPersonOption = { id: string; name: string; company_id: string };
 
 export function EditDrawer({
@@ -68,10 +70,17 @@ export function EditDrawer({
     ? companies
     : [{ id: row.company_id, name: currentCompanyName || "Current company" }, ...companies];
   const companyPeople = salesPeople.filter(sp => sp.company_id === form.company_id);
+  const selectedCompany = companyOptions.find(c => c.id === form.company_id);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    const eod = form.event_type === "eod_update"
+      ? commitEodOutcome(form.outcome, {
+          ownerName: selectedCompany?.ownerName,
+          companyName: selectedCompany?.name || currentCompanyName,
+        })
+      : null;
     startTransition(async () => {
       const res = await editActivity({
         id: row.id,
@@ -79,7 +88,8 @@ export function EditDrawer({
         occurred_on: form.occurred_on,
         sales_person_id: form.sales_person_id || null,
         event_type: form.event_type as ActivityRowForEdit["event_type"] as "eod_update" | "quote_sent" | "site_visit_booked" | "email_sent" | "job_won",
-        outcome: form.outcome,
+        outcome: eod ? eod.outcome : form.outcome,
+        ad_source: eod ? (eod.source || null) : undefined,
         contact_name: form.contact_name,
         contact_address: form.contact_address,
         quote_job_value: form.quote_job_value,
@@ -194,14 +204,24 @@ export function EditDrawer({
             />
           </Field>
 
-          <Field label="Outcome" hint="Pipe-delimited: leadType | answer | action | notes | source">
-            <input
-              type="text"
+          {form.event_type === "eod_update" ? (
+            <OutcomeFields
               value={form.outcome}
-              onChange={e => setForm(f => ({ ...f, outcome: e.target.value }))}
-              className={`${inputClass} font-mono text-[12px]`}
+              onChange={outcome => setForm(f => ({ ...f, outcome }))}
+              ownerName={selectedCompany?.ownerName}
+              companyName={selectedCompany?.name || currentCompanyName}
+              inputClass={inputClass}
             />
-          </Field>
+          ) : (
+            <Field label="Outcome">
+              <input
+                type="text"
+                value={form.outcome}
+                onChange={e => setForm(f => ({ ...f, outcome: e.target.value }))}
+                className={inputClass}
+              />
+            </Field>
+          )}
 
           <Field label="Quote / job value" hint="Pipe-delimited dollars, no symbols (e.g. 1200|3500).">
             <input

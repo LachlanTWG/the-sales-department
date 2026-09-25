@@ -14,7 +14,9 @@ import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { createManualActivities } from "./actions";
 import { chosenSplitPartners, type NewActivityItem } from "@/lib/manualActivities";
+import { commitEodOutcome } from "@/lib/eodOutcome";
 import { SplitWithPicker } from "@/components/SplitWithPicker";
+import { OutcomeFields } from "./OutcomeFields";
 
 // Backfill-only surface. Day-to-day Email sent / Quote sent should come from
 // mailbox OAuth sync (Gmail/Outlook) and Quotie — these exist when automation misses.
@@ -28,7 +30,7 @@ const EVENT_TYPES = [
 
 type EventType = (typeof EVENT_TYPES)[number]["value"];
 
-export type CompanyOption = { id: string; name: string };
+export type CompanyOption = { id: string; name: string; ownerName?: string | null };
 export type SalesPersonOption = { id: string; name: string; company_id: string };
 
 type Item = {
@@ -91,6 +93,7 @@ export function AddActivityDrawer({
 
   const companyPeople = useMemo(() => peopleFor(companyId), [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
   const loggerName = salesPeople.find(p => p.id === salesPersonId)?.name ?? "";
+  const selectedCompany = companies.find(c => c.id === companyId);
 
   function chooseCompany(id: string) {
     setCompanyId(id);
@@ -124,18 +127,26 @@ export function AddActivityDrawer({
       }
     }
     startTransition(async () => {
-      const payloadItems: NewActivityItem[] = items.map(it => ({
-        contact_name: it.contact_name,
-        contact_address: it.contact_address,
-        outcome: it.outcome,
-        ad_source: it.ad_source,
-        quote_job_value: it.quote_job_value,
-        appointment_at: it.appointment_at,
-        quote_number: it.quote_number,
-        split_commission: it.split_commission,
-        split_with: it.split_commission ? chosenSplitPartners(loggerName, it.split_with) : [],
-        half_commission_charge: it.half_commission_charge,
-      }));
+      const payloadItems: NewActivityItem[] = items.map(it => {
+        const eod = eventType === "eod_update"
+          ? commitEodOutcome(it.outcome, {
+              ownerName: selectedCompany?.ownerName,
+              companyName: selectedCompany?.name,
+            })
+          : null;
+        return {
+          contact_name: it.contact_name,
+          contact_address: it.contact_address,
+          outcome: eod ? eod.outcome : it.outcome,
+          ad_source: eod ? eod.source : it.ad_source,
+          quote_job_value: it.quote_job_value,
+          appointment_at: it.appointment_at,
+          quote_number: it.quote_number,
+          split_commission: it.split_commission,
+          split_with: it.split_commission ? chosenSplitPartners(loggerName, it.split_with) : [],
+          half_commission_charge: it.half_commission_charge,
+        };
+      });
       const res = await createManualActivities({
         company_id: companyId,
         sales_person_id: salesPersonId || null,
@@ -336,14 +347,13 @@ export function AddActivityDrawer({
                   )}
 
                   {eventType === "eod_update" && (
-                    <Field label="Outcome" hint="Pipe-delimited: leadType | answer | action | notes | source">
-                      <input
-                        type="text"
-                        value={it.outcome}
-                        onChange={e => patchItem(i, { outcome: e.target.value })}
-                        className={`${inputClass} font-mono text-[12px]`}
-                      />
-                    </Field>
+                    <OutcomeFields
+                      value={it.outcome}
+                      onChange={outcome => patchItem(i, { outcome })}
+                      ownerName={selectedCompany?.ownerName}
+                      companyName={selectedCompany?.name}
+                      inputClass={inputClass}
+                    />
                   )}
 
                   {(eventType === "quote_sent" || eventType === "job_won" || eventType === "site_visit_booked") && (
@@ -357,7 +367,7 @@ export function AddActivityDrawer({
                     </Field>
                   )}
 
-                  {(eventType === "quote_sent" || eventType === "job_won" || eventType === "eod_update") && (
+                  {(eventType === "quote_sent" || eventType === "job_won") && (
                     <Field label="Lead source" hint="Optional.">
                       <input
                         type="text"

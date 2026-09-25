@@ -99,7 +99,7 @@ export default async function ActivitiesPage({
   const addableCompanies = (viewer.isAdmin
     ? companies
     : companies.filter(c => viewer.companyIds.includes(c.id))
-  ).map(c => ({ id: c.id, name: c.name }));
+  ).map(c => ({ id: c.id, name: c.name, ownerName: c.owner_name ?? null }));
 
   return (
     <div className="px-6 py-6 lg:px-8">
@@ -132,7 +132,7 @@ export default async function ActivitiesPage({
       </header>
 
       <div className="mt-5">
-        <Filters companies={companies} salesPeople={salesPeople} defaults={filters} />
+        <Filters companies={companies.map(c => ({ id: c.id, name: c.name }))} salesPeople={salesPeople} defaults={filters} />
       </div>
 
       <div className="mt-4 overflow-x-auto rounded-xl border border-zinc-800">

@@ -12,6 +12,15 @@ import {
   loggedVisitCoversPending,
   LOGGED_VISIT_LOOKBACK_MS,
 } from "@/lib/siteVisitMatch";
+import {
+  ACTION_ALIASES,
+  EOD_SOURCES,
+  EOD_STAGES,
+  companyExtraSources,
+  standardOutcomes,
+} from "@/lib/eodOutcome";
+
+export { companyExtraSources };
 
 /** Per-request GHL HTTP budget — a hung LeadConnector call must not stall the popup. */
 const GHL_TIMEOUT_MS = 2000;
@@ -801,78 +810,6 @@ export type GhlContact = {
   ownerName: string;
 };
 
-const DEFAULT_STAGES = ["New Leads", "Pre-Quote Follow Up", "Post Quote Follow Up"];
-// The pipeline workflows branch on string equality against these values, so
-// they must stay in sync with the workflow conditions. Deliberately uses the
-// CORRECTED "Not a Good Time to Talk" (GHL's field had a "TIme" typo, being
-// retired) — the workflow branch conditions must be updated to match. The
-// punctuation-insensitive learned-options dedup hides hyphen/spacing variants
-// (e.g. HDK's "Not Ready Yet - Pre Quote" ≡ "Not Ready Yet - Pre-Quote").
-// EOD 3 dropdown order (top → bottom) — matches the order execs expect when selecting.
-// "Passed Onto {owner}" is a standard action (HDK → Jesse, Bolton → Jed); without
-// it in defaults it only appears after 3 recent logs, so quiet months hide it.
-function defaultOutcomes(ownerName?: string | null): string[] {
-  const owner = (ownerName || "").trim();
-  return [
-    "Not a Good Time to Talk",
-    "Requires Quoting",
-    "Book Site Visit",
-    ...(owner ? [`Passed Onto ${owner}`] : []),
-    "Not Ready Yet - Pre-Quote",
-    "Not Ready Yet - Post Quote",
-    "Quote Sent",
-    "Verbal Confirmation",
-    "Waiting on Photos",
-    // Terminal — Lost
-    "Lost - Price",
-    "Lost - Time Related",
-    "Lost - Priorities Changed",
-    // Terminal — DQ (Incorrect Details ≠ Wrong Contact/Spam: real lead, bad contact info)
-    "DQ - Incorrect Details",
-    "DQ - Wrong Contact / Spam",
-    "DQ - Out of Service Area",
-    "DQ - Extent of Works",
-    "DQ - Price",
-    "DQ - Lead Looking for Work",
-    "DQ - Recommended Another Company",
-    "DQ - Trying to Sell Me Something",
-    "DQ - Not Proceeding",
-    // Terminal — Abandoned
-    "Abandoned - Not Responding",
-    "Abandoned - Headache",
-  ];
-}
-
-/** Fold GHL / typo variants into the canonical EOD 3 label before learning extras. */
-const OUTCOME_ALIASES: Record<string, string> = {
-  "Not Ready Yet - Pre Quote": "Not Ready Yet - Pre-Quote",
-  "Not Ready for Site Visit": "Not Ready Yet - Pre-Quote",
-  "Rescheduled Site Visit": "Not Ready Yet - Pre-Quote",
-  "Not Ready to Proceed w. Job": "Not Ready Yet - Post Quote",
-};
-const DEFAULT_SOURCES = [
-  "Facebook Ad Form",
-  "Facebook Message",
-  "Google Ads",
-  "Website Form",
-  "Direct Phone Call",
-  "Direct Email",
-  "Direct Lead passed on from Client",
-];
-
-/**
- * Client-specific EOD 5 sources that aren't in the shared defaults. Matched
- * on company name/slug (same loose match as companyVertical) so a slug
- * rename doesn't silently drop the option. Learned values need 3 recent
- * logs before they surface, so a brand-new channel has to be listed here.
- */
-export function companyExtraSources(companyName: string, slug?: string): string[] {
-  const s = `${companyName} ${slug || ""}`.toLowerCase();
-  // HDK Longrun Roofing — dedicated landing page launched Sep 2026.
-  if (s.includes("hdk")) return ["Landing Page Lead Form"];
-  return [];
-}
-
 const EVENT_LABELS: Record<string, string> = {
   eod_update: "EOD update",
   quote_sent: "Quote sent",
@@ -951,11 +888,11 @@ export async function fetchEodOptions(
     }
   }
 
-  const outcomes = defaultOutcomes(ownerName);
+  const outcomes = standardOutcomes(ownerName);
   return {
-    stages: mergeLearned(counts[0], DEFAULT_STAGES),
-    outcomes: mergeLearned(counts[1], outcomes, OUTCOME_ALIASES),
-    sources: mergeLearned(counts[2], [...DEFAULT_SOURCES, ...extraSources]),
+    stages: mergeLearned(counts[0], EOD_STAGES),
+    outcomes: mergeLearned(counts[1], outcomes, ACTION_ALIASES),
+    sources: mergeLearned(counts[2], [...EOD_SOURCES, ...extraSources]),
   };
 }
 
